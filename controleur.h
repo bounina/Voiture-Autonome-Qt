@@ -34,7 +34,8 @@ public slots:
     void newDatas();
     void conversion();
     void onoff(QString);
-
+    void testBoucleDirection();
+    void testBoucleVitesse();
 
 
 private:
