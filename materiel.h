@@ -10,15 +10,17 @@ class Materiel : public QObject
     Q_OBJECT
 public:
     Materiel();
+    array<int,360> distances_mm;
 
 protected:
-    array<int,360> distances_mm;
+
 
 public slots:
     virtual void deplacer(double _vitesse, double _angle)=0;
 
 signals:
     void newDatas();
+    void sendAffichage(QString envoi);
 
 };
 

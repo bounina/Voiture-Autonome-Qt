@@ -23,6 +23,7 @@ private:
 public slots:
     void sendDatas(QString message);
     void getDatas();
+
 private slots:
     void connexion();
     void deconnexion();

@@ -94,4 +94,3 @@ void PWM::setDuty(int duty)
         qDebug()<<"erreur duty cycle !";
     }
 }
-

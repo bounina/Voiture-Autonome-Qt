@@ -23,4 +23,6 @@ void MaterielSimule::deplacer(double _vitesse, double _angle)
     QString angle = QString::number(_angle, 'f', 4);
     QString resultat = vitesse + ";" + angle;
     tcp.sendDatas(resultat);
+    QString envoi = "la vitesse est de " + vitesse + "\n" + "l'angle est de " + angle;
+    emit sendAffichage(envoi);
 }

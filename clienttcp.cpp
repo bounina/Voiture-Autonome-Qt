@@ -24,7 +24,6 @@ ClientTCP::ClientTCP(QString _addressIp, int _port)
 void ClientTCP::connectToHost()
 {
   clientSocket.connectToHost(addressIp,port);
-
 }
 
 
@@ -35,11 +34,11 @@ void ClientTCP::sendDatas(QString message)
     out.setVersion(QDataStream::Qt_5_0);
     out << message;
     clientSocket.write(block);
-    qDebug()<<"message envoyé :"<<message;
 }
 
 void ClientTCP::getDatas()
 {
+
     dataIn.startTransaction();
     if (!dataIn.commitTransaction()) return;
     QString message;

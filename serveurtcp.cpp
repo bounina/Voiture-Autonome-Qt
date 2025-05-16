@@ -7,16 +7,9 @@
 
 
 ServeurTcp::ServeurTcp(int _port) {
-
-
     port=_port;
-
-
-
     connect(&monServeur,&QTcpServer::newConnection,
              this,&ServeurTcp::newConnexion);
-
-
     bool resEcoute = monServeur.listen((QHostAddress::AnyIPv4),_port);
     if( resEcoute == true)
     {
@@ -37,8 +30,6 @@ void ServeurTcp::newConnexion()
     dataIn.setDevice(serveurSocket);
 
 }
-
-
 
 
 void ServeurTcp::getDatas()
@@ -62,7 +53,7 @@ void ServeurTcp::sendDatas(QString message)
         QDataStream out(&block, QIODevice::WriteOnly);
         out.setVersion(QDataStream::Qt_5_0);
         out << message;
-        qDebug()<<"message envoyé :"<<message;
+        // qDebug()<<"message envoyé :"<< message;
         serveurSocket->write(block);
     }
 }
