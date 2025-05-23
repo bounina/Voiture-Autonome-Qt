@@ -1,65 +1,104 @@
+// controleur.cpp
+
 #include "controleur.h"
 #include <QDebug>
 #include <QThread>
+#include <cmath>
 
-Controleur::Controleur(array<int,360>&_distances_mm) : distances_mm(_distances_mm)
+Controleur::Controleur(std::array<int,360>& _distances_mm)
+    : distances_mm(_distances_mm)
 {
+    timer.start();
+}
+
+void Controleur::initPID(double _kp, double _ki, double _kd, double _k_anticipation)
+{
+    kp = _kp;
+    ki = _ki;
+    kd = _kd;
+    k_anticipation = _k_anticipation;
+    I = 0.0;
+    erreur_prec = 0.0;
+    firstRun = true;
+    timer.restart();
 }
 
 void Controleur::newDatas()
 {
-
- if (isRunning == true)
- {
-    double angle = 0;
-    double vitesse = 0;
-    double erreur = 0;
-    double erreurv = 0;
-    for(int i=-10; i<11; i++)
-    {
-        double radians = (i*M_PI)/180;
-        erreurv += cos(radians) * distances_mm.at(i+180);
+    if (!isRunning) {
+        emit deplacer(0,0);
+        return;
     }
-    vitesse = 0.000009571 * erreurv + 0.40;
-    if(vitesse <0) vitesse = 0;
-    if(vitesse >0.65) vitesse = 0.65;
 
-
-     for(int i=-90; i<91; i++)
-    {
-       double radians = (i*M_PI)/180;
-       erreur += sin(radians) * distances_mm.at(i+180);
+    // 1) Calcul de l'erreur et de l'anticipation
+    double erreurd =0.0;
+    double erreurg =0.0;
+    double erreur = 0.0;
+    double anticipation = 0.0;
+    for (int i = 0; i <= 105; ++i) {
+        double rad = i * M_PI / 180.0;
+       erreurd += std::sin(rad) * distances_mm.at(i + 180);
+       erreurg += std::sin(rad) * distances_mm.at(180 - i);
+       erreur = erreurd - erreurg;
     }
-    angle = kp * erreur /*+ ki * somme_erreurs + kd * erreur_precedente*/ ;
-    if(angle <-1) angle= -1; //droite
-    if(angle >1) angle = 1; // gauche
+    for (int i = 30; i <= 85; i += 5) {
+        double rad = i * M_PI / 180.0;
+        anticipation += distances_mm.at(180 + i) * std::sin(rad);
+    }
+    for (int i = -85; i <= -30; i += 5) {
+        double rad = i * M_PI / 180.0;
+        anticipation -= distances_mm.at(180 + i) * std::sin(rad);
+    }
 
+    // 2) Mesure du dt
+    double dt = 0.0;
+    if (!firstRun) {
+        dt = timer.elapsed() / 1000.0;  // en secondes
+    } else {
+        firstRun = false;
+    }
+    timer.restart();
 
+    // 3) Terme intégral
+    I += erreur * dt;
+
+    // 4) Terme dérivé
+    double D = dt > 0 ? (erreur - erreur_prec) / dt : 0.0;
+    erreur_prec = erreur;
+
+    // 5) Décalage de virage (comme avant)
+    double decalage_virage = 0.0;
+    if (std::abs(anticipation) > 500000000) {
+        decalage_virage = -anticipation / 15.0;
+    }
+
+    // 6) Calcul PID + anticipation
+    double angle = kp*(erreur+ decalage_virage)
+                   + ki*I
+                   + kd*D
+                   + k_anticipation*anticipation;
+
+    // 7) Saturation [-1 ; 1]
+    angle = std::clamp(angle, -1.0, 1.0);
+
+    // 8) Envoi commande
+    double vitesse = 0.35;  // reste constante
     emit deplacer(vitesse, angle);
-//    somme_erreurs += erreur;
-//    erreur_precedente = erreur;
 
-    QString envoi =  "la vitesse est "+QString::number(vitesse) +'\n'+"l'angle est "+ QString::number(angle);
-    emit sendAffichage(envoi);
-    qDebug()<<"l'envoi est"<<envoi;
-  }
- else
- {
-    emit deplacer(0,0);
- }
-
+    // 9) Debug
+    QString debug = QString("v=%1 | err=%2 | I=%3 | D=%4 | ant=%5 | dec=%6 | ang=%7")
+                        .arg(vitesse)
+                        .arg(erreur)
+                        .arg(I)
+                        .arg(D)
+                        .arg(anticipation)
+                        .arg(decalage_virage)
+                        .arg(angle);
+    emit sendAffichage(debug);
+    qDebug() << debug;
 }
 
 
-
-
-void Controleur::initPID(double _kp, /*double _ki, double _kd,*/double _kpv)
-{
-    kp = _kp;
-//    ki = _ki;
-//    kd = _kd;
-    kpv = _kpv;
-}
 
 void Controleur::conversion()
 {
@@ -86,7 +125,7 @@ void Controleur::onoff(QString message)
 
 void Controleur::testBoucleDirection()
 {
-    double vitesse = 0.4; // vitesse constante pour les tests
+    double vitesse = 0.0; // vitesse constante pour les tests
     double step = 0.1; // pas d'incrémentation de l'angle
     double angle = -1.0;
 
@@ -152,5 +191,4 @@ void Controleur::testBoucleVitesse()
 
     emit deplacer(0, 0); // Arrêt à la fin
 }
-
 

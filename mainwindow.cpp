@@ -12,7 +12,11 @@ MainWindow::MainWindow(QObject *parent)
 {
 // c1.initPID(0.0000013,0.0000006);
 
-    c1.initPID(0.0000621,0.0000535);
+    c1.initPID(0.000035,0.0,0.0, 0.0);
+    // A TESTER c1.initPID(0.00008, 0.00011); !
+
+
+
 
 //     connect(&c1, &Controleur::deplacer,
 //             &m1, &MaterielSimule::deplacer);

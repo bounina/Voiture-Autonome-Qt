@@ -4,6 +4,7 @@
 #include <QtMath>
 #include <QObject>
 #include <array>
+#include <QElapsedTimer>
 
 using std::array;
 
@@ -12,34 +13,35 @@ class Controleur : public QObject
     Q_OBJECT
 
 public:
-    Controleur(array<int,360>&_distances_mm);
-    // coefficients:
-    bool isRunning=false;
-    double kpv;
-    double kp;
-    double ki;
-    double kd;
-    void initPID(double _kp, /*double _ki, double _kd,*/ double _kpv);
-    // erreurs:
-    double erreur_precedente;
-    double somme_erreurs;
-    array<int,360>&distances_mm;
+    explicit Controleur(std::array<int,360>& distances_mm);
 
+    void initPID(double _kp, double _ki, double _kd, double _k_anticipation);
+    void newDatas();
+    void conversion();
+    void onoff(QString message);
 
 signals:
     void deplacer(double vitesse, double angle);
-    void donneeconvertion(QString );
-    void sendAffichage(QString);
-public slots:
-    void newDatas();
-    void conversion();
-    void onoff(QString);
+    void sendAffichage(const QString&);
+    void donneeconvertion(const QString&);
+
+private:
     void testBoucleDirection();
     void testBoucleVitesse();
 
+    std::array<int,360>& distances_mm;
+    bool isRunning = false;
 
-private:
+    // PID
+    double kp = 0.0;
+    double ki = 0.0;
+    double kd = 0.0;
+    double k_anticipation = 0.0;
 
+    double I = 0.0;             // Terme intégral
+    double erreur_prec = 0.0;   // Dernière erreur
+    QElapsedTimer timer;        // Pour mesurer dt
+    bool firstRun = true;
 };
 
-#endif
+#endif // CONTROLEUR_H

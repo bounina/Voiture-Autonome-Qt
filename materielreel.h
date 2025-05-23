@@ -24,8 +24,8 @@ public slots:
 signals:
 private:
     QTimer tictocLidar;
-    ServoMoteur vitesse{2,1500,200};
-    ServoMoteur direction{3,1500,200};
+    ServoMoteur vitesse{2,1500,300,300};
+    ServoMoteur direction{3,1500,220,350};
 };
 
 #endif // MATERIELREEL_H
