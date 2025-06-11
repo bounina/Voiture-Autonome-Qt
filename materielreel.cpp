@@ -79,6 +79,7 @@ void MaterielReel::lidarValue()
         }
     }
     emit newDatas();
+
 }
 
 void MaterielReel::deplacer(double _vitesse, double _angle)

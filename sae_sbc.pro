@@ -17,7 +17,8 @@ SOURCES += \
     materielreel.cpp \
     pwm.cpp \
     serveurtcp.cpp \
-    servomoteur.cpp
+    servomoteur.cpp \
+    tfmini.cpp
 
 HEADERS += \
     clienttcp.h \
@@ -28,7 +29,8 @@ HEADERS += \
     materielsimule.h \
     pwm.h \
     serveurtcp.h \
-    servomoteur.h
+    servomoteur.h \
+    tfmini.h
 
 FORMS += \
     mainwindow.ui
@@ -37,6 +39,7 @@ QT += network
 
 
 unix:!macx: LIBS += -L/opt/electronique/pi4TpInfo/sysroot/rplidar/rplidar_sdk/output/Linux/Release/ -lsl_lidar_sdk
+# LIBS += -li2c
 
 INCLUDEPATH += /opt/electronique/pi4TpInfo/sysroot/rplidar/rplidar_sdk/sdk/include
 INCLUDEPATH += /opt/electronique/pi4TpInfo/sysroot/rplidar/rplidar_sdk/sdk/src

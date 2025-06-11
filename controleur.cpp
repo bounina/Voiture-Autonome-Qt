@@ -1,194 +1,246 @@
-// controleur.cpp
-
+// Controleur.cpp
 #include "controleur.h"
 #include <QDebug>
 #include <QThread>
-#include <cmath>
 
-Controleur::Controleur(std::array<int,360>& _distances_mm)
-    : distances_mm(_distances_mm)
+Controleur::Controleur(std::array<int,360>& distancesMm, QObject* parent)
+    : QObject(parent)
+    , distances_mm(distancesMm)
 {
     timer.start();
+    speedCtrl.currentSpeed = vmin;
 }
 
-void Controleur::initPID(double _kp, double _ki, double _kd, double _k_anticipation)
+void Controleur::initPID(double _kp, double _ki, double _kd)
 {
-    kp = _kp;
-    ki = _ki;
-    kd = _kd;
-    k_anticipation = _k_anticipation;
-    I = 0.0;
-    erreur_prec = 0.0;
-    firstRun = true;
+    pid.kp       = _kp;
+    pid.ki       = _ki;
+    pid.kd       = _kd;
+    pid.I        = 0.0;
+    pid.prevErr  = 0.0;
+    pid.firstRun = true;
     timer.restart();
 }
 
 void Controleur::newDatas()
 {
     if (!isRunning) {
-        emit deplacer(0,0);
+        emit deplacer(0.0, 0.0);
         return;
     }
 
-    // 1) Calcul de l'erreur et de l'anticipation
-    double erreurd =0.0;
-    double erreurg =0.0;
-    double erreur = 0.0;
-    double anticipation = 0.0;
-    for (int i = 0; i <= 105; ++i) {
-        double rad = i * M_PI / 180.0;
-       erreurd += std::sin(rad) * distances_mm.at(i + 180);
-       erreurg += std::sin(rad) * distances_mm.at(180 - i);
-       erreur = erreurd - erreurg;
-    }
-    for (int i = 30; i <= 85; i += 5) {
-        double rad = i * M_PI / 180.0;
-        anticipation += distances_mm.at(180 + i) * std::sin(rad);
-    }
-    for (int i = -85; i <= -30; i += 5) {
-        double rad = i * M_PI / 180.0;
-        anticipation -= distances_mm.at(180 + i) * std::sin(rad);
+    // 1) Détection d'un obstacle frontal
+    if (handleReverseDetection()) {
+        handleReverseMovement();
+        return;
     }
 
-    // 2) Mesure du dt
-    double dt = 0.0;
-    if (!firstRun) {
-        dt = timer.elapsed() / 1000.0;  // en secondes
+    // 2) Si on est déjà en phase reverse
+    if (revPhase != ReversePhase::Idle) {
+        handleReverseMovement();
+        return;
+    }
+
+    // 3) Contrôle PID normal avec biais latéral conditionnel
+    double error = computeError();
+    double dt    = timer.restart() / 1000.0;
+    double angle = pid.update(error, dt);
+    double speed = speedCtrl.update(angle);
+
+    emit deplacer(speed, angle);
+    sendDebugInfo(speed, error);
+}
+
+bool Controleur::handleReverseDetection()
+{
+    if (revPhase != ReversePhase::Idle) return false;
+
+    // moyenne des distances devant le robot
+    double distFront = (
+                           distances_mm[179] +
+                           distances_mm[180] +
+                           distances_mm[181]
+                           ) / 3.0;
+
+    if (distFront >= seuilReverse)
+        return false;
+
+    // entrée en phase reverse
+    double sumL = sumRange(distances_mm, 60, 120);
+    double sumR = sumRange(distances_mm, 240, 300);
+    reverseTimer.restart();
+
+    if (sumL < seuilSideClear && sumR < seuilSideClear) {
+        revPhase = ReversePhase::Straight;
+        qDebug() << "[REVERSE] both sides blocked"
+                 << "(sumL=" << sumL << " sumR=" << sumR << "), STRAIGHT";
     } else {
-        firstRun = false;
+        revPhase = ReversePhase::Turn1;
+        turnLeftFirst = (sumL > sumR);
+        qDebug() << "[REVERSE] side clear:"
+                 << "sumL=" << sumL << " sumR=" << sumR
+                 << "→ turnLeftFirst=" << turnLeftFirst;
     }
-    timer.restart();
+    return true;
+}
 
-    // 3) Terme intégral
-    I += erreur * dt;
-
-    // 4) Terme dérivé
-    double D = dt > 0 ? (erreur - erreur_prec) / dt : 0.0;
-    erreur_prec = erreur;
-
-    // 5) Décalage de virage (comme avant)
-    double decalage_virage = 0.0;
-    if (std::abs(anticipation) > 500000000) {
-        decalage_virage = -anticipation / 15.0;
+void Controleur::handleReverseMovement()
+{
+    if (revPhase == ReversePhase::Straight) {
+        double sumL = sumRange(distances_mm, 60, 120);
+        double sumR = sumRange(distances_mm, 240, 300);
+        if (sumL >= seuilSideClear || sumR >= seuilSideClear) {
+            revPhase = ReversePhase::Turn1;
+            turnLeftFirst = (sumL > sumR);
+            reverseTimer.restart();
+            qDebug() << "[REVERSE] side freed"
+                     << "(sumL=" << sumL << " sumR=" << sumR << "), TURN1";
+        } else {
+            emit deplacer(vitesseReverse, 0.0);
+            qDebug() << "[REV STRAIGHT] speed=" << vitesseReverse;
+            return;
+        }
     }
 
-    // 6) Calcul PID + anticipation
-    double angle = kp*(erreur+ decalage_virage)
-                   + ki*I
-                   + kd*D
-                   + k_anticipation*anticipation;
+    int t = static_cast<int>(reverseTimer.elapsed());
+    if (t < phase1Ms) {
+        double ang = turnLeftFirst ? +angleS : -angleS;
+        emit deplacer(vitesseReverse, ang);
+        qDebug() << "[REV TURN1] t=" << t << "ms ang=" << ang;
+    }
+    else if (t < phase1Ms + phase2Ms) {
+        revPhase = ReversePhase::Turn2;
+        double ang = turnLeftFirst ? -angleS : +angleS;
+        emit deplacer(vitesseReverse, ang);
+        qDebug() << "[REV TURN2] t=" << t << "ms ang=" << ang;
+    }
+    else {
+        revPhase = ReversePhase::Idle;
+        emit deplacer(0.0, 0.0);
+        qDebug() << "[REVERSE] Done after"
+                 << (phase1Ms + phase2Ms) << "ms";
+    }
+}
 
-    // 7) Saturation [-1 ; 1]
-    angle = std::clamp(angle, -1.0, 1.0);
+double Controleur::computeError() const
+{
+    // 1) Calcul standard de l'erreur de centrage
+    double errR = 0.0, errL = 0.0;
+    for (int i = 0; i <= 90; ++i) {
+        double rad = M_PI * i / 180.0;
+        errR += std::sin(rad) * distances_mm[180 + i];
+        errL += std::sin(rad) * distances_mm[180 - i];
+    }
+    double err = errR - errL;
 
-    // 8) Envoi commande
-    double vitesse = 0.35;  // reste constante
-    emit deplacer(vitesse, angle);
+    // 2) Estimation de la couleur du virage à venir
+    double sumAheadLeft  = sumRange(distances_mm, 135, 180);
+    double sumAheadRight = sumRange(distances_mm, 180, 225);
+    double diffAhead     = sumAheadLeft - sumAheadRight;
 
-    // 9) Debug
-    QString debug = QString("v=%1 | err=%2 | I=%3 | D=%4 | ant=%5 | dec=%6 | ang=%7")
-                        .arg(vitesse)
-                        .arg(erreur)
-                        .arg(I)
-                        .arg(D)
-                        .arg(anticipation)
-                        .arg(decalage_virage)
-                        .arg(angle);
+    // 3) Biais latéral conditionnel
+    double bias = 0.0;
+    if (std::fabs(diffAhead) > lateralBiasThreshold) {
+        bias = (diffAhead < 0.0
+                    ? lateralBiasMagnitude
+                    : -lateralBiasMagnitude);
+    }
+
+    return err + bias;
+}
+
+void Controleur::sendDebugInfo(double vTarget, double error)
+{
+    QString debug = QString(
+                        "vCible=%1 | err=%2 | P=%3 | I=%4 | D=%5 | bias=%6"
+                        )
+                        .arg(vTarget,     0, 'f', 2)
+                        .arg(error,       0, 'f', 2)
+                        .arg(pid.lastP,   0, 'f', 2)
+                        .arg(pid.lastI,   0, 'f', 2)
+                        .arg(pid.lastD,   0, 'f', 2)
+                        .arg(error - (pid.lastP+pid.lastI+pid.lastD), 0, 'f', 2);
+
     emit sendAffichage(debug);
     qDebug() << debug;
 }
 
-
+double Controleur::sumRange(
+    const std::array<int,360>& D,
+    int start, int end, int step
+    ) {
+    double sum = 0.0;
+    for (int d = start; d <= end; d += step)
+        sum += D[d];
+    return sum;
+}
 
 void Controleur::conversion()
 {
     QString message;
-    for(int i=0;i<360;i++)
-    {
-        message.append(QString::number(distances_mm.at(i)));
-        if(i !=359)message.append(";");
+    for (int i = 0; i < 360; ++i) {
+        message += QString::number(distances_mm[i]);
+        if (i != 359) message += ';';
     }
     emit donneeconvertion(message);
 }
 
-void Controleur::onoff(QString message)
+void Controleur::onoff(const QString& message)
 {
     qDebug() << message;
-    if (message == "on") isRunning = true;
-    else if (message == "off") isRunning = false;
-    else if (message == "test_angle") testBoucleDirection();
+    if      (message == "on")           isRunning = true;
+    else if (message == "off")          isRunning = false;
+    else if (message == "test_angle")   testBoucleDirection();
     else if (message == "test_vitesse") testBoucleVitesse();
-
-    qDebug() << isRunning;
+    qDebug() << "isRunning =" << isRunning;
 }
-
 
 void Controleur::testBoucleDirection()
 {
-    double vitesse = 0.0; // vitesse constante pour les tests
-    double step = 0.1; // pas d'incrémentation de l'angle
-    double angle = -1.0;
-
-    // Balayage de -1 à 1
-    while (angle <= 1.0)
-    {
+    double vitesse = 0.0, step = 0.1, angle = -1.0;
+    while (angle <= 1.0) {
         emit deplacer(vitesse, angle);
-        QString info = "Test -> Vitesse : " + QString::number(vitesse) + " | Angle : " + QString::number(angle);
+        QString info = QString("Test -> V:%1 | A:%2")
+                           .arg(vitesse).arg(angle);
         emit sendAffichage(info);
         qDebug() << info;
-
         angle += step;
-        QThread::msleep(300); // Petite pause pour voir l'effet
+        QThread::msleep(300);
     }
-
-    // Balayage retour de 1 à -1
     angle = 1.0 - step;
-    while (angle >= -1.0)
-    {
+    while (angle >= -1.0) {
         emit deplacer(vitesse, angle);
-        QString info = "Test <- Vitesse : " + QString::number(vitesse) + " | Angle : " + QString::number(angle);
+        QString info = QString("Test <- V:%1 | A:%2")
+                           .arg(vitesse).arg(angle);
         emit sendAffichage(info);
         qDebug() << info;
-
         angle -= step;
         QThread::msleep(300);
     }
-
-    emit deplacer(0, 0); // Arrêt à la fin du test
+    emit deplacer(0.0, 0.0);
 }
-
 
 void Controleur::testBoucleVitesse()
 {
-    double angle = 0.0; // direction fixe
-    double step = 0.05; // pas d'augmentation de la vitesse
-    double vitesse = 0.0;
-
-    // Balayage de 0 à 0.65
-    while (vitesse <= 0.8)
-    {
+    double angle = 0.0, step = 0.05, vitesse = 0.0;
+    while (vitesse <= 0.8) {
         emit deplacer(vitesse, angle);
-        QString info = "Test -> Vitesse : " + QString::number(vitesse) + " | Angle : " + QString::number(angle);
+        QString info = QString("Test -> V:%1 | A:%2")
+                           .arg(vitesse).arg(angle);
         emit sendAffichage(info);
         qDebug() << info;
-
         vitesse += step;
         QThread::msleep(300);
     }
-
-    // Balayage retour de 0.65 à 0
     vitesse = 0.8 - step;
-    while (vitesse >= 0.0)
-    {
+    while (vitesse >= 0.0) {
         emit deplacer(vitesse, angle);
-        QString info = "Test <- Vitesse : " + QString::number(vitesse) + " | Angle : " + QString::number(angle);
+        QString info = QString("Test <- V:%1 | A:%2")
+                           .arg(vitesse).arg(angle);
         emit sendAffichage(info);
         qDebug() << info;
-
         vitesse -= step;
         QThread::msleep(300);
     }
-
-    emit deplacer(0, 0); // Arrêt à la fin
+    emit deplacer(0.0, 0.0);
 }
-
