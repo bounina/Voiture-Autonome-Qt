@@ -12,7 +12,7 @@ MainWindow::MainWindow(QObject *parent)
 {
 
     c1.initPID(
-        0.000015,
+        0.000013,
         0.00001,
         0.000005
         );

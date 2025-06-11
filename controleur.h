@@ -11,6 +11,7 @@
 
 class Controleur : public QObject {
     Q_OBJECT
+
 public:
     explicit Controleur(std::array<int,360>& distancesMm, QObject* parent = nullptr);
     void initPID(double kp, double ki, double kd);
@@ -36,18 +37,24 @@ private:
 
         double update(double err, double dt) {
             if (firstRun) {
-                prevErr = err;
-                firstRun = false;
+                prevErr   = err;
+                firstRun  = false;
             }
             I += err * dt;
+            // Reset intégrale si changement de signe
             if ((prevErr < 0 && err >= 0) || (prevErr > 0 && err <= 0))
                 I = 0.0;
-            double D    = dt > 0.0 ? (err - prevErr) / dt : 0.0;
-            double P    = kp * err;
-            double Iterm= ki * I;
-            double Dterm= kd * D;
-            lastP = P; lastI = Iterm; lastD = Dterm;
+
+            double D     = (dt > 0.0) ? (err - prevErr) / dt : 0.0;
+            double P     = kp * err;
+            double Iterm = ki * I;
+            double Dterm = kd * D;
+
+            lastP = P;
+            lastI = Iterm;
+            lastD = Dterm;
             prevErr = err;
+
             return P + Iterm + Dterm;
         }
     };
@@ -69,7 +76,6 @@ private:
     bool handleReverseDetection();
     void handleReverseMovement();
     double computeError() const;
-    // nouvelle signature
     void sendDebugInfo(double vTarget, double error);
 
     static double sumRange(const std::array<int,360>& D, int start, int end, int step = 10);
@@ -77,6 +83,7 @@ private:
     void testBoucleDirection();
     void testBoucleVitesse();
 
+    // --- membres ---
     std::array<int,360>& distances_mm;
     QElapsedTimer timer, reverseTimer;
     bool isRunning{false};
@@ -86,19 +93,16 @@ private:
     SpeedController speedCtrl;
 
     // Constantes de configuration
-    static constexpr double seuilReverse             = 175.0;
-    static constexpr double seuilSideClear           = 175.0;
-    static constexpr double vitesseReverse           = -0.35;
-    static constexpr int    phase1Ms                 = 1000;
-    static constexpr int    phase2Ms                 = 200;
-    static constexpr double angleS                   = 1.0;
-    static constexpr double vmax                     = 0.60;
-    static constexpr double vmin                     = 0.35;
-    static constexpr double accelFact                = 0.015;
-    static constexpr double decelFact                = 0.07;
-    // Paramètres de biais latéral
-    static constexpr double lateralBiasMagnitude     = 10000;
-    static constexpr double lateralBiasThreshold     = 0;
+    static constexpr double seuilReverse    = 175.0;
+    static constexpr double seuilSideClear  = 175.0;
+    static constexpr double vitesseReverse  = -0.35;
+    static constexpr int    phase1Ms        = 1000;
+    static constexpr int    phase2Ms        = 200;
+    static constexpr double angleS          = 1.0;
+    static constexpr double vmax            = 0.65;
+    static constexpr double vmin            = 0.37;
+    static constexpr double accelFact       = 0.03;
+    static constexpr double decelFact       = 0.1;
 };
 
 #endif // CONTROLEUR_H
