@@ -22,6 +22,12 @@ void Controleur::initPID(double _kp, double _ki, double _kd)
     timer.restart();
 }
 
+void Controleur::onTfminiDistance(int dist_cm)
+{
+    // Mise à jour de la distance TFmini
+    tfminiDistCm = dist_cm;
+}
+
 void Controleur::newDatas()
 {
     if (!isRunning) {
@@ -56,6 +62,14 @@ bool Controleur::handleReverseDetection()
     double distFront = (distances_mm[179] + distances_mm[180] + distances_mm[181]) / 3.0;
     if (distFront >= seuilReverse) return false;
 
+    // ** Nouveau : si TFmini détecte < 15 cm en marche arrière, on stoppe **
+    if (tfminiDistCm <= 15) {
+        qDebug() << "[REVERSE] TFmini obstacle à" << tfminiDistCm << "cm → arrêt";
+        revPhase = ReversePhase::Idle;
+        emit deplacer(0.0, 0.0);
+        return true;
+    }
+
     double sumL = sumRange(distances_mm,  60, 120);
     double sumR = sumRange(distances_mm, 240, 300);
     reverseTimer.restart();
@@ -73,11 +87,17 @@ bool Controleur::handleReverseDetection()
 
 void Controleur::handleReverseMovement()
 {
+    // ** Nouveau : si TFmini detecte obstacle pendant reversal, on stoppe et repart normal **
+    if (tfminiDistCm <= 15) {
+            revPhase = ReversePhase::Idle;
+        return;
+    }
+
     if (revPhase == ReversePhase::Straight) {
         double sumL = sumRange(distances_mm,  60, 120);
         double sumR = sumRange(distances_mm, 240, 300);
         if (sumL >= seuilSideClear || sumR >= seuilSideClear) {
-            revPhase      = ReversePhase::Turn1;
+            revPhase = ReversePhase::Turn1;
             turnLeftFirst = (sumL > sumR);
             reverseTimer.restart();
         } else {
@@ -104,7 +124,6 @@ void Controleur::handleReverseMovement()
 
 double Controleur::computeError() const
 {
-
     double errR = 0.0, errL = 0.0;
     for (int i = 0; i <= 100; ++i) {
         double rad = M_PI * i / 180.0;

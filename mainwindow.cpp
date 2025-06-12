@@ -17,6 +17,10 @@ MainWindow::MainWindow(QObject *parent)
         0.000005
         );
 
+    connect(&mr1, &MaterielReel::tfminiDistanceChanged,
+            &c1 ,   &Controleur::onTfminiDistance);
+
+
     connect(&mr1, &MaterielReel::newDatas,
             &c1, &Controleur::newDatas);
     connect(&mr1, &MaterielReel::newDatas,

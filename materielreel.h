@@ -30,6 +30,7 @@ public slots:
 
 signals:
     void newDatas();
+    void tfminiDistanceChanged(int distance_cm);
 
 private:
     QTimer tictocLidar;

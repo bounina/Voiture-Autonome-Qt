@@ -3,14 +3,24 @@
 #include "materielreel.h"
 #include <QtMath>
 
+
+#include <fcntl.h>         // O_RDWR
+#include <unistd.h>        // open(), read(), close()
+#include <sys/ioctl.h>     // ioctl()
+#include <linux/i2c-dev.h> // I2C_SLAVE
+#include <cerrno>          // errno
+#include <cstring>         // strerror()
+
 ILidarDriver* drv = nullptr;
 
 #ifndef _countof
 #define _countof(_Array) (int)(sizeof(_Array) / sizeof(_Array[0]))
 #endif
 
+
 MaterielReel::MaterielReel()
 {
+
     // Timer LIDAR
     tictocLidar.setInterval(50);
     tictocLidar.start();
@@ -94,14 +104,37 @@ void MaterielReel::lidarValue()
 
 void MaterielReel::tfminiValue()
 {
-    int distance = tfmini->getDistance();
-    if (distance > 0) {
-        qDebug() << "TFmini Distance:" << distance << "cm";
-        tfminiDistance = distance;
-    } else {
-        qDebug() << "Erreur de lecture TFmini";
+    // 1) Lecture en cm
+    int dist_cm = tfmini->getDistance();
+    if (dist_cm <= 0) {
+        return;
     }
+
+    emit tfminiDistanceChanged(dist_cm);
+
+
+    // 3) Filtre médian (tampon de 5 mesures)
+    static QList<int> buffer;
+    buffer.append(dist_cm);
+    if (buffer.size() > 5)
+        buffer.removeFirst();
+
+    QList<int> sorted = buffer;
+    std::sort(sorted.begin(), sorted.end());
+    int med_cm = sorted.at(sorted.size() / 2);
+
+    // 4) Affichage en cm et en m
+    double med_m = med_cm / 100.0;  // cm → m
+    qDebug() << "TFmini Distance filtrée:"
+             << med_cm << "cm (" << med_m << "m)";
+
+    // 5) Stockage interne
+    tfminiDistance = med_cm;
 }
+
+
+
+
 
 void MaterielReel::deplacer(double _vitesse, double _angle)
 {

@@ -20,6 +20,7 @@ public slots:
     void newDatas();
     void conversion();
     void onoff(const QString& message);
+    void onTfminiDistance(int dist_cm);    // <— slot pour mise à jour TFmini
 
 signals:
     void deplacer(double vitesse, double angle);
@@ -41,7 +42,6 @@ private:
                 firstRun  = false;
             }
             I += err * dt;
-            // Reset intégrale si changement de signe
             if ((prevErr < 0 && err >= 0) || (prevErr > 0 && err <= 0))
                 I = 0.0;
 
@@ -50,9 +50,7 @@ private:
             double Iterm = ki * I;
             double Dterm = kd * D;
 
-            lastP = P;
-            lastI = Iterm;
-            lastD = Dterm;
+            lastP = P; lastI = Iterm; lastD = Dterm;
             prevErr = err;
 
             return P + Iterm + Dterm;
@@ -79,7 +77,6 @@ private:
     void sendDebugInfo(double vTarget, double error);
 
     static double sumRange(const std::array<int,360>& D, int start, int end, int step = 10);
-
     void testBoucleDirection();
     void testBoucleVitesse();
 
@@ -92,6 +89,9 @@ private:
     PID pid;
     SpeedController speedCtrl;
 
+    // ** TFmini **
+    int tfminiDistCm{1000};  // dernière mesure TFmini en cm
+
     // Constantes de configuration
     static constexpr double seuilReverse    = 175.0;
     static constexpr double seuilSideClear  = 175.0;
@@ -99,8 +99,8 @@ private:
     static constexpr int    phase1Ms        = 1000;
     static constexpr int    phase2Ms        = 200;
     static constexpr double angleS          = 1.0;
-    static constexpr double vmax            = 0.65;
-    static constexpr double vmin            = 0.37;
+    static constexpr double vmax            = 0.60;
+    static constexpr double vmin            = 0.35;
     static constexpr double accelFact       = 0.03;
     static constexpr double decelFact       = 0.1;
 };
