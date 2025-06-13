@@ -1,4 +1,3 @@
-// Controleur.h
 #ifndef CONTROLEUR_H
 #define CONTROLEUR_H
 
@@ -8,6 +7,8 @@
 #include <array>
 #include <cmath>
 #include <algorithm>
+
+//#define ADRIEN
 
 class Controleur : public QObject {
     Q_OBJECT
@@ -59,9 +60,9 @@ private:
 
     struct SpeedController {
         double currentSpeed{0.0};
-        double update(double angle) {
-            double factor = std::fabs(angle);
-            double target = vmin + (vmax - vmin) * (1.0 - factor);
+        double update(double angle, double forwardFactor) {
+            double angleFactor = std::fabs(angle);
+            double target = vmin + (vmax - vmin) * (1.0 - angleFactor) * forwardFactor;
             if (target > currentSpeed)
                 currentSpeed += accelFact * (target - currentSpeed);
             else
@@ -74,6 +75,7 @@ private:
     bool handleReverseDetection();
     void handleReverseMovement();
     double computeError() const;
+    double computeForwardFactor() const; // Ajouté
     void sendDebugInfo(double vTarget, double error);
 
     static double sumRange(const std::array<int,360>& D, int start, int end, int step = 10);
@@ -93,16 +95,16 @@ private:
     int tfminiDistCm{1000};  // dernière mesure TFmini en cm
 
     // Constantes de configuration
-    static constexpr double seuilReverse    = 175.0;
-    static constexpr double seuilSideClear  = 175.0;
+    static constexpr double seuilReverse    = 100.0;
+    static constexpr double seuilSideClear  = 100.0;
     static constexpr double vitesseReverse  = -0.35;
     static constexpr int    phase1Ms        = 1000;
     static constexpr int    phase2Ms        = 200;
     static constexpr double angleS          = 1.0;
-    static constexpr double vmax            = 0.60;
+    static constexpr double vmax            = 0.80;
     static constexpr double vmin            = 0.35;
-    static constexpr double accelFact       = 0.03;
-    static constexpr double decelFact       = 0.1;
+    static constexpr double accelFact       = 0.07; //limite = 1 => en 1 coup d'horloge : currentSpeed = targetSpeed
+    static constexpr double decelFact       = 0.6;
 };
 
 #endif // CONTROLEUR_H

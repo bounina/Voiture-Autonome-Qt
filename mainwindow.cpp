@@ -12,9 +12,9 @@ MainWindow::MainWindow(QObject *parent)
 {
 
     c1.initPID(
-        0.000013,
-        0.00001,
-        0.000005
+        0.0000088,
+        0.0000001,
+        0.00000052
         );
 
     connect(&mr1, &MaterielReel::tfminiDistanceChanged,
@@ -42,11 +42,3 @@ MainWindow::MainWindow(QObject *parent)
 MainWindow::~MainWindow()
 {
 }
-
-
-
-
-
-
-
-

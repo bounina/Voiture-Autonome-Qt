@@ -123,11 +123,6 @@ void MaterielReel::tfminiValue()
     std::sort(sorted.begin(), sorted.end());
     int med_cm = sorted.at(sorted.size() / 2);
 
-    // 4) Affichage en cm et en m
-    double med_m = med_cm / 100.0;  // cm → m
-    qDebug() << "TFmini Distance filtrée:"
-             << med_cm << "cm (" << med_m << "m)";
-
     // 5) Stockage interne
     tfminiDistance = med_cm;
 }

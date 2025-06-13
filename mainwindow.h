@@ -9,6 +9,7 @@
 #include "serveurtcp.h"
 #include "materielreel.h"
 
+
 class MainWindow : public QObject
 {
     Q_OBJECT

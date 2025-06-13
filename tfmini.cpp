@@ -42,16 +42,12 @@ int TFmini::getDistance() {
     // 1) Demande 7 octets à partir du registre 0x0102
     uint8_t cmd[3] = { 0x01, 0x02, 0x07 };
     if (write(file_, cmd, 3) != 3) {
-        std::cerr << "TFmini: write cmd failed: "
-                  << std::strerror(errno) << "\n";
         return -1;
     }
 
     // 2) Lecture brute (7 octets)
     uint8_t rx_buf[7] = {0};
     if (read(file_, rx_buf, sizeof(rx_buf)) != int(sizeof(rx_buf))) {
-        std::cerr << "TFmini: read data failed: "
-                  << std::strerror(errno) << "\n";
         return -1;
     }
 

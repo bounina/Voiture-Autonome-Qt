@@ -1,4 +1,3 @@
-// Controleur.cpp
 #include "controleur.h"
 #include <QDebug>
 #include <QThread>
@@ -24,7 +23,6 @@ void Controleur::initPID(double _kp, double _ki, double _kd)
 
 void Controleur::onTfminiDistance(int dist_cm)
 {
-    // Mise à jour de la distance TFmini
     tfminiDistCm = dist_cm;
 }
 
@@ -35,7 +33,6 @@ void Controleur::newDatas()
         return;
     }
 
-    // 1) Si obstacle devant → mode reverse
     if (handleReverseDetection()) {
         handleReverseMovement();
         return;
@@ -45,11 +42,13 @@ void Controleur::newDatas()
         return;
     }
 
-    // 2) Boucle PID normale
     double error = computeError();
     double dt    = timer.restart() / 1000.0;
     double angle = pid.update(error, dt);
-    double speed = speedCtrl.update(angle);
+
+    double forwardFactor = computeForwardFactor();
+
+    double speed = speedCtrl.update(angle, forwardFactor);
 
     emit deplacer(speed, angle);
     sendDebugInfo(speed, error);
@@ -62,13 +61,6 @@ bool Controleur::handleReverseDetection()
     double distFront = (distances_mm[179] + distances_mm[180] + distances_mm[181]) / 3.0;
     if (distFront >= seuilReverse) return false;
 
-    // ** Nouveau : si TFmini détecte < 15 cm en marche arrière, on stoppe **
-    if (tfminiDistCm <= 15) {
-        qDebug() << "[REVERSE] TFmini obstacle à" << tfminiDistCm << "cm → arrêt";
-        revPhase = ReversePhase::Idle;
-        emit deplacer(0.0, 0.0);
-        return true;
-    }
 
     double sumL = sumRange(distances_mm,  60, 120);
     double sumR = sumRange(distances_mm, 240, 300);
@@ -76,22 +68,15 @@ bool Controleur::handleReverseDetection()
 
     if (sumL < seuilSideClear && sumR < seuilSideClear) {
         revPhase = ReversePhase::Straight;
-        qDebug() << "[REVERSE] both sides blocked";
     } else {
         revPhase = ReversePhase::Turn1;
         turnLeftFirst = (sumL > sumR);
-        qDebug() << "[REVERSE] turnLeftFirst =" << turnLeftFirst;
     }
     return true;
 }
 
 void Controleur::handleReverseMovement()
 {
-    // ** Nouveau : si TFmini detecte obstacle pendant reversal, on stoppe et repart normal **
-    if (tfminiDistCm <= 15) {
-            revPhase = ReversePhase::Idle;
-        return;
-    }
 
     if (revPhase == ReversePhase::Straight) {
         double sumL = sumRange(distances_mm,  60, 120);
@@ -125,24 +110,53 @@ void Controleur::handleReverseMovement()
 double Controleur::computeError() const
 {
     double errR = 0.0, errL = 0.0;
-    for (int i = 0; i <= 100; ++i) {
+    for (int i = 0; i <= 90; ++i) {
         double rad = M_PI * i / 180.0;
         errR += std::sin(rad) * distances_mm[180 + i];
         errL += std::sin(rad) * distances_mm[180 - i];
     }
-    return errR - errL;
+    return errR - errL + 35000;
+}
+
+double Controleur::computeForwardFactor() const
+{
+    double sum = 0.0;
+    double weightSum = 0.0;
+
+    for (int i = -20; i <= 20; ++i) {
+        int index = (180 + i + 360) % 360;
+        double angleRad = i * M_PI / 180.0;
+        double weight = std::pow(std::cos(angleRad), 2); // accentue le centre
+        sum += weight * distances_mm[index];
+        weightSum += weight;
+    }
+
+    double meanDist = sum / weightSum;
+
+    // Nouveau réglage : commence à ralentir à 6000 mm, vitesse minimale en dessous de 2000 mm
+    constexpr double seuilBas = 1800.0;  // 2 mètres = vitesse min
+    constexpr double seuilHaut = 6000.0; // 6 mètres = vitesse max
+
+    double factor = (meanDist - seuilBas) / (seuilHaut - seuilBas);
+    factor = std::clamp(factor, 0.0, 1.0);
+
+    return factor;
 }
 
 void Controleur::sendDebugInfo(double vTarget, double error)
 {
-    QString debug = QString("vCible=%1 | err=%2 | P=%3 | I=%4 | D=%5")
+    QString debug = QString("vCible=%1 | err=%2 | P=%3 | I=%4 | D=%5 | ForwardFactor=%6")
                         .arg(vTarget,   0, 'f', 2)
                         .arg(error,     0, 'f', 2)
                         .arg(pid.lastP, 0, 'f', 2)
                         .arg(pid.lastI, 0, 'f', 2)
-                        .arg(pid.lastD, 0, 'f', 2);
+                        .arg(pid.lastD, 0, 'f', 2)
+                        .arg(computeForwardFactor(),0 , 'f', 2);
 
-    emit sendAffichage(debug);
+
+
+
+    //emit sendAffichage(debug);
     qDebug() << debug;
 }
 
@@ -168,12 +182,12 @@ void Controleur::conversion()
 
 void Controleur::onoff(const QString& message)
 {
-    qDebug() << message;
+    //qDebug() << message;
     if      (message == "on")         isRunning = true;
     else if (message == "off")        isRunning = false;
     else if (message == "test_angle") testBoucleDirection();
     else if (message == "test_vitesse") testBoucleVitesse();
-    qDebug() << "isRunning =" << isRunning;
+    //qDebug() << "isRunning =" << isRunning;
 }
 
 void Controleur::testBoucleDirection()

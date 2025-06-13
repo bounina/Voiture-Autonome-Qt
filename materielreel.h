@@ -34,8 +34,8 @@ signals:
 
 private:
     QTimer tictocLidar;
-    ServoMoteur vitesse{2,1500,300,300};
-    ServoMoteur direction{3,1500,300,300};
+    ServoMoteur vitesse{2,1500,335,335};
+    ServoMoteur direction{3,1500,300,470}; // droite/gquche
     TFmini *tfmini;              // Capteur TFmini
     QTimer tictocTFmini;
     int tfminiDistance{0};
