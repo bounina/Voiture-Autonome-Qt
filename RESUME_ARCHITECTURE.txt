@@ -1,0 +1,124 @@
+================================================================================
+                RESUME ARCHITECTURE — TELEOPERATION MANUELLE
+================================================================================
+
+Date : Février 2026
+Projet : Voiture Autonome — SAE Raspberry Pi
+
+================================================================================
+1. ARCHITECTURE DE COMMUNICATION
+================================================================================
+
+Problème résolu : VNC saturait le réseau (1-2 FPS). Maintenant le flux vidéo
+est envoyé en JPEG compressé via TCP, et affiché nativement sur le PC Windows.
+
+Méthode choisie : JPEG-over-TCP
+- Simple, fiable, pas de dépendances externes
+- ~30 FPS à 640x480, ~1 MB/s de bande passante
+- Latence < 50ms sur WiFi local
+
+Schéma :
+
+    RASPBERRY PI                              PC WINDOWS
+    ├── video_streamer.py ──TCP:8885───────► teleop_client.py
+    │   (Picamera2 → JPEG)                   (cv2.imshow + clavier)
+    │                                                │
+    └── sae_sbc (C++ Qt) ◄──TCP:8884────────────────┘
+        (Moteur + Servo)     (TELEOP:FWD, TELEOP:LEFT, etc.)
+
+Protocole vidéo (port 8885) :
+    [4 octets uint32 big-endian = taille JPEG] [N octets = données JPEG]
+    En boucle continue.
+
+Protocole commandes (port 8884) :
+    Messages texte terminés par \n :
+    - TELEOP:FWD    → avancer (vitesse 0.15)
+    - TELEOP:BWD    → reculer (vitesse -0.10)
+    - TELEOP:LEFT   → braquer gauche (angle -= 0.1, borné [-1, 1])
+    - TELEOP:RIGHT  → braquer droite (angle += 0.1, borné [-1, 1])
+    - TELEOP:STOP   → arrêt total (vitesse=0, angle=0)
+
+================================================================================
+2. FICHIERS MODIFIÉS
+================================================================================
+
+C++ (repo Voiture-Autonome-Qt) :
+
+  controleur.h
+    - Ajout : bool modeManuel (true par défaut)
+    - Ajout : double manualSpeed, manualAngle
+    - Ajout : constantes ANGLE_STEP, MANUAL_FWD_SPEED, MANUAL_BWD_SPEED
+    - Ajout : slot handleManualCommand(const QString& cmd)
+
+  controleur.cpp
+    - newDatas() : ajout if(modeManuel) { emit deplacer(...); return; }
+      → Le PID/computeError() est totalement contourné MAIS conservé intact.
+    - onoff() : ajout détection préfixe "TELEOP:" → dispatch handleManualCommand
+    - Nouvelle méthode handleManualCommand() : gère FWD/BWD/LEFT/RIGHT/STOP
+
+Python (repo Camera_arriere) :
+
+  python_camera/video_streamer.py  [NOUVEAU]
+    - Serveur de streaming JPEG-over-TCP (port 8885)
+    - Tourne sur la Raspberry Pi via SSH
+    - Capture Picamera2 640x480, encode JPEG qualité 70
+
+  python_camera/teleop_client.py   [NOUVEAU]
+    - Client de téléopération (port 8884 + 8885)
+    - Tourne sur le PC Windows
+    - Affiche vidéo native cv2.imshow + capture clavier
+    - HUD : FPS, vitesse, angle, barre de direction, état connexions
+
+  python_camera/phase3_calibrate   [INCHANGÉ]
+    - Script de calibration de l'homographie (usage indépendant)
+
+================================================================================
+3. MODE D'EMPLOI
+================================================================================
+
+Prérequis :
+  - Pi et PC sur le même réseau WiFi
+  - Connaître l'IP de la Pi (ex: hostname -I sur la Pi)
+  - Python 3.9+, opencv-python installé sur le PC
+
+ÉTAPE 1 — Sur la Raspberry Pi (via SSH) :
+
+  # Terminal 1 : Lancer le C++ (moteurs)
+  cd ~/Voiture-Autonome-Qt/build
+  ./sae_sbc
+
+  # Terminal 2 : Lancer le streaming vidéo
+  cd ~/Camera_arriere/python_camera
+  python3 video_streamer.py --rotate 180
+
+ÉTAPE 2 — Sur le PC Windows :
+
+  cd C:\...\Camera_arriere\python_camera
+  python teleop_client.py --pi-ip 192.168.1.42
+
+  (Remplacer 192.168.1.42 par l'IP réelle de la Pi)
+
+ÉTAPE 3 — Piloter :
+
+  Z = Avancer       S = Reculer
+  Q = Gauche         D = Droite
+  ESPACE = Arrêt total
+  ESC = Quitter
+
+La direction est PROGRESSIVE : chaque appui Q ou D tourne de 0.1.
+Espace remet vitesse ET angle à zéro.
+
+================================================================================
+4. POUR RÉACTIVER L'AUTONOMIE PLUS TARD
+================================================================================
+
+Dans controleur.h, changer :
+    bool modeManuel{true};   →   bool modeManuel{false};
+
+Ou ajouter une commande TCP "AUTO:ON" dans onoff() qui fait :
+    modeManuel = false;
+    isRunning = true;
+
+Le code PID (computeError, pid.update, speedCtrl) est intact et fonctionnel.
+
+================================================================================

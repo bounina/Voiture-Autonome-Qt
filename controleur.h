@@ -40,6 +40,7 @@ public slots:
     void conversion();
     void onoff(const QString& message);
     void onTfminiDistance(int dist_cm);    // slot pour mise à jour TFmini
+    void handleManualCommand(const QString& cmd);  // téléopération manuelle
 
 private slots:
     void onFrontStableTimeout();   // déclenché après stableDurationMs
@@ -116,7 +117,17 @@ private:
     // TFmini
     int tfminiDistCm{1000};
 
-    // Constantes de configuration
+    // ========== TÉLÉOPÉRATION MANUELLE ==========
+    bool   modeManuel{true};        // activé par défaut (désactive le PID)
+    double manualSpeed{0.0};        // vitesse courante en mode manuel
+    double manualAngle{0.0};        // angle courant en mode manuel
+
+    static constexpr double ANGLE_STEP        = 0.1;   // incrément par appui Q/D
+    static constexpr double MANUAL_FWD_SPEED  = 0.15;  // vitesse avant (Z)
+    static constexpr double MANUAL_BWD_SPEED  = -0.10; // vitesse arrière (S)
+    // =============================================
+
+    // Constantes de configuration (autonomie)
     static constexpr double seuilReverse    = 100.0;
     static constexpr double seuilSideClear  = 100.0;
     static constexpr double vitesseReverse  = -0.10;

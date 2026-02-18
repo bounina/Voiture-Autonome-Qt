@@ -40,6 +40,16 @@ void Controleur::newDatas()
         return;
     }
 
+    // ========== TÉLÉOPÉRATION MANUELLE ==========
+    // Quand modeManuel est actif, on envoie directement les consignes
+    // manuelles et on court-circuite toute la boucle PID.
+    if (modeManuel) {
+        emit deplacer(manualSpeed, manualAngle);
+        return;
+    }
+    // ========== FIN TÉLÉOPÉRATION ==========
+
+    // --- Conduite autonome (PID) --- conservée intacte pour usage futur ---
     // détection de front immobile
 //    handleReverseDetection();
 //    if (revPhase != ReversePhase::Idle) {
@@ -225,6 +235,13 @@ void Controleur::conversion()
 
 void Controleur::onoff(const QString& message)
 {
+    // Commandes de téléopération manuelle (préfixe TELEOP:)
+    if (message.startsWith("TELEOP:")) {
+        handleManualCommand(message);
+        return;
+    }
+
+    // Commandes existantes (on/off/test)
     if      (message == "on")           isRunning = true;
     else if (message == "off")          isRunning = false;
     else if (message == "test_angle")   testBoucleDirection();
@@ -276,4 +293,38 @@ void Controleur::testBoucleVitesse()
         QThread::msleep(300);
     }
     emit deplacer(0.0, 0.0);
+}
+
+// ========== TÉLÉOPÉRATION MANUELLE ==========
+void Controleur::handleManualCommand(const QString& cmd)
+{
+    // Active automatiquement le running + mode manuel
+    isRunning  = true;
+    modeManuel = true;
+
+    if (cmd == "TELEOP:FWD") {
+        manualSpeed = MANUAL_FWD_SPEED;
+    }
+    else if (cmd == "TELEOP:BWD") {
+        manualSpeed = MANUAL_BWD_SPEED;
+    }
+    else if (cmd == "TELEOP:LEFT") {
+        manualAngle = std::clamp(manualAngle - ANGLE_STEP, -1.0, 1.0);
+    }
+    else if (cmd == "TELEOP:RIGHT") {
+        manualAngle = std::clamp(manualAngle + ANGLE_STEP, -1.0, 1.0);
+    }
+    else if (cmd == "TELEOP:STOP") {
+        manualSpeed = 0.0;
+        manualAngle = 0.0;
+    }
+    else {
+        qDebug() << "[TELEOP] Commande inconnue:" << cmd;
+        return;
+    }
+
+    qDebug() << "[TELEOP]" << cmd << "-> V:" << manualSpeed << "A:" << manualAngle;
+
+    // Applique immédiatement la consigne pour réactivité maximale
+    emit deplacer(manualSpeed, manualAngle);
 }
