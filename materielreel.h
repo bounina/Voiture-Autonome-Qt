@@ -57,7 +57,7 @@ private:
     QTimer tictocLidar;
 
     // Seul le servo de direction est conservé (la vitesse est gérée par le MD04)
-    ServoMoteur direction{2,1500,300,470}; // droite/gauche
+    ServoMoteur direction{0,1500,300,470}; // canal PWM 0 (GPIO12), droite/gauche
 
     TFmini *tfmini;              // Capteur TFmini
     QTimer tictocTFmini;
