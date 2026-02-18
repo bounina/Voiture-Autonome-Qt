@@ -4,7 +4,7 @@ ServoMoteur::ServoMoteur(const int pwmChannel,
                          const int _centerDuty_us,
                          const int _gainPosDuty_us,
                          const int _gainNegDuty_us)
-    : pwm(2, pwmChannel, 50),
+    : pwm(0, pwmChannel, 50),   // pwmchip0 (vérifié: ls /sys/class/pwm/)
     centerDuty_us(_centerDuty_us),
     gainPosDuty_us(_gainPosDuty_us),
     gainNegDuty_us(_gainNegDuty_us)
