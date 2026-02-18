@@ -48,13 +48,14 @@ MaterielReel::MaterielReel()
                     qDebug() << "SN:" << devinfo.serialnum;
                 qDebug() << "Firmware:" << (devinfo.firmware_version >> 8) << "." << (devinfo.firmware_version & 0xFF)
                          << " HW rev:" << (int)devinfo.hardware_version;
+                drv->setMotorSpeed();
+                drv->startScan(0, 1);
             } else {
                 delete drv;
                 drv = nullptr;
                 qDebug() << "Impossible de récupérer les infos du LIDAR";
+                tictocLidar.stop(); // Pas de LIDAR -> on arrête le timer
             }
-            drv->setMotorSpeed();
-            drv->startScan(0, 1);
         } else {
             qDebug() << "Échec de connexion au LIDAR";
         }
@@ -182,6 +183,8 @@ void MaterielReel::deplacer(double _vitesse, double _angle)
 
 void MaterielReel::lidarValue()
 {
+    if (!drv) return;  // Pas de LIDAR connecté -> on ne fait rien
+
     sl_lidar_response_measurement_node_hq_t nodes[8192];
     size_t count = _countof(nodes);
     sl_result op_result = drv->grabScanDataHq(nodes, count);
