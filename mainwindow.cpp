@@ -11,12 +11,14 @@ MainWindow::MainWindow(QObject *parent)
 
 {
 
-    c1.initPID(
-        0.0000088,
-        0.0000001,
-        0.00000052
-        );
+//    c1.initPID(
+//        (0.00000922 - ((c1.speedCtrl.currentSpeed-0.35)/245000)),
+//                                                     //+ grand = reduit avec + de vitesse
+//        0.000000,
+//        0.00000036
+//        );
 
+    c1.initPID(0.00002, 0.0, 0.000);
     connect(&mr1, &MaterielReel::tfminiDistanceChanged,
             &c1 ,   &Controleur::onTfminiDistance);
 

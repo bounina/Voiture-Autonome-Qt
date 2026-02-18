@@ -1,7 +1,7 @@
 // TFmini.h
 #ifndef TFMINI_H
 #define TFMINI_H
-
+#include <cstdint>
 #include <string>
 
 class TFmini {

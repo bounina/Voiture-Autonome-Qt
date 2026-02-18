@@ -34,15 +34,18 @@ void ServeurTcp::newConnexion()
 
 void ServeurTcp::getDatas()
 {
-    dataIn.startTransaction();
-    if (!dataIn.commitTransaction()) return;
-    QString message;
-    while(! dataIn.atEnd())
-    {
-        dataIn >> message;
-        emit newDatas(message);
-    }
+    if (serveurSocket != nullptr) {
+        QByteArray data = serveurSocket->readAll();
+        QString messages = QString::fromUtf8(data);
+        QStringList list = messages.split('\n', Qt::SkipEmptyParts);
 
+        for(int i = 0; i < list.size(); ++i) {
+            QString msg = list.at(i).trimmed();
+            if(!msg.isEmpty()) {
+                emit newDatas(msg);
+            }
+        }
+    }
 }
 
 void ServeurTcp::sendDatas(QString message)

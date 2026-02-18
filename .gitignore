@@ -1,5 +1,12 @@
-<<<<<<< HEAD
-sae_sbc.pro.user
-=======
+# Fichiers de configuration utilisateur Qt
 *.pro.user*
->>>>>>> 34beb9a269a61cb44bf18a1b2620619e212207d4
+build/
+build-*/
+*.o
+*.a
+*.so
+Makefile*
+moc_*
+ui_*
+qrc_*
+sae_sbc
