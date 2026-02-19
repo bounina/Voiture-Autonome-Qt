@@ -1,124 +1,299 @@
 ================================================================================
-                RESUME ARCHITECTURE — TELEOPERATION MANUELLE
+                RESUME ARCHITECTURE — TELEOPERATION MANUELLE v2
 ================================================================================
 
 Date : Février 2026
-Projet : Voiture Autonome — SAE Raspberry Pi
+Projet : Voiture Autonome — SAE Raspberry Pi 4
 
 ================================================================================
-1. ARCHITECTURE DE COMMUNICATION
+1. VUE D'ENSEMBLE
 ================================================================================
 
-Problème résolu : VNC saturait le réseau (1-2 FPS). Maintenant le flux vidéo
-est envoyé en JPEG compressé via TCP, et affiché nativement sur le PC Windows.
+Système de téléopération temps réel permettant de piloter un véhicule
+autonome miniature depuis un PC distant. Le système remplace le VNC
+(1-2 FPS) par un streaming JPEG-over-TCP (~30 FPS, <50ms de latence).
 
-Méthode choisie : JPEG-over-TCP
-- Simple, fiable, pas de dépendances externes
-- ~30 FPS à 640x480, ~1 MB/s de bande passante
-- Latence < 50ms sur WiFi local
-
-Schéma :
-
-    RASPBERRY PI                              PC WINDOWS
-    ├── video_streamer.py ──TCP:8885───────► teleop_client.py
-    │   (Picamera2 → JPEG)                   (cv2.imshow + clavier)
-    │                                                │
-    └── sae_sbc (C++ Qt) ◄──TCP:8884────────────────┘
-        (Moteur + Servo)     (TELEOP:FWD, TELEOP:LEFT, etc.)
-
-Protocole vidéo (port 8885) :
-    [4 octets uint32 big-endian = taille JPEG] [N octets = données JPEG]
-    En boucle continue.
-
-Protocole commandes (port 8884) :
-    Messages texte terminés par \n :
-    - TELEOP:FWD    → avancer (vitesse 0.15)
-    - TELEOP:BWD    → reculer (vitesse -0.10)
-    - TELEOP:LEFT   → braquer gauche (angle -= 0.1, borné [-1, 1])
-    - TELEOP:RIGHT  → braquer droite (angle += 0.1, borné [-1, 1])
-    - TELEOP:STOP   → arrêt total (vitesse=0, angle=0)
+Deux modes de fonctionnement :
+  • Mode Manuel (TÉLÉOP)  — Pilotage RC temps réel depuis le PC (actif)
+  • Mode Autonome (PID)   — Suivi de murs par LIDAR (code préservé, désactivé)
 
 ================================================================================
-2. FICHIERS MODIFIÉS
+2. ARCHITECTURE DE COMMUNICATION
 ================================================================================
 
-C++ (repo Voiture-Autonome-Qt) :
-
-  controleur.h
-    - Ajout : bool modeManuel (true par défaut)
-    - Ajout : double manualSpeed, manualAngle
-    - Ajout : constantes ANGLE_STEP, MANUAL_FWD_SPEED, MANUAL_BWD_SPEED
-    - Ajout : slot handleManualCommand(const QString& cmd)
-
-  controleur.cpp
-    - newDatas() : ajout if(modeManuel) { emit deplacer(...); return; }
-      → Le PID/computeError() est totalement contourné MAIS conservé intact.
-    - onoff() : ajout détection préfixe "TELEOP:" → dispatch handleManualCommand
-    - Nouvelle méthode handleManualCommand() : gère FWD/BWD/LEFT/RIGHT/STOP
-
-Python (repo Camera_arriere) :
-
-  python_camera/video_streamer.py  [NOUVEAU]
-    - Serveur de streaming JPEG-over-TCP (port 8885)
-    - Tourne sur la Raspberry Pi via SSH
-    - Capture Picamera2 640x480, encode JPEG qualité 70
-
-  python_camera/teleop_client.py   [NOUVEAU]
-    - Client de téléopération (port 8884 + 8885)
-    - Tourne sur le PC Windows
-    - Affiche vidéo native cv2.imshow + capture clavier
-    - HUD : FPS, vitesse, angle, barre de direction, état connexions
-
-  python_camera/phase3_calibrate   [INCHANGÉ]
-    - Script de calibration de l'homographie (usage indépendant)
+    ┌──────────── RASPBERRY PI 4 ────────────────────────┐
+    │                                                     │
+    │        ┌────────────────────────┐                   │
+    │        │   video_streamer.py    │   (Python)        │
+    │        │   Picamera2 640×480    │                   │
+    │        │   JPEG quality 70      │                   │
+    │        │   30 FPS               │                   │
+    │        └──────────┬─────────────┘                   │
+    │                   │ TCP:8885 (flux vidéo)           │
+    │                   │ [4B taille][N bytes JPEG]       │
+    │                   ▼                                 │
+    │   ════════════════╪═════════════════════════════    │
+    │                   │           RÉSEAU WiFi           │
+    │   ════════════════╪═════════════════════════════    │
+    │                   │                                 │
+    │        ┌──────────┴─────────────┐                   │
+    │        │     sae_sbc (C++ Qt)   │                   │
+    │        │  ┌─────────────┐       │                   │
+    │        │  │ ServeurTcp  │◄──────┼── TCP:8884        │
+    │        │  │ port 8884   │       │   (commandes)     │
+    │        │  └──────┬──────┘       │                   │
+    │        │         ▼              │                   │
+    │        │  ┌─────────────┐       │                   │
+    │        │  │ Controleur  │       │                   │
+    │        │  │ modeManuel  │       │                   │
+    │        │  └──┬──────┬───┘       │                   │
+    │        │     │      │           │                   │
+    │        │     ▼      ▼           │                   │
+    │        │  I2C     PWM           │                   │
+    │        │  MD04    ServoMoteur   │                   │
+    │        └────┼──────┼────────────┘                   │
+    │             ▼      ▼                                │
+    │         ┌──────┐ ┌────────┐                         │
+    │         │Moteur│ │ Servo  │                         │
+    │         │DC    │ │ Direct.│                         │
+    │         └──────┘ └────────┘                         │
+    └─────────────────────────────────────────────────────┘
+                         │ WiFi / Tailscale VPN
+                         ▼
+    ┌──────────── PC WINDOWS ─────────────────────────────┐
+    │                                                      │
+    │        ┌──────────────────────────────────┐          │
+    │        │      teleop_client.py            │          │
+    │        │                                  │          │
+    │        │  ┌────────────────────────────┐  │          │
+    │        │  │ Thread VideoReceiver       │  │          │
+    │        │  │ Réception JPEG TCP:8885    │  │          │
+    │        │  │ Décodage OpenCV            │  │          │
+    │        │  └─────────────┬──────────────┘  │          │
+    │        │                │ frame            │          │
+    │        │                ▼                  │          │
+    │        │  ┌────────────────────────────┐  │          │
+    │        │  │ Boucle principale (30 Hz)  │  │          │
+    │        │  │ keyboard.is_pressed()      │  │          │
+    │        │  │ → touches simultanées      │  │          │
+    │        │  │ → rampe accélération       │  │          │
+    │        │  │ → HUD + cv2.imshow         │  │          │
+    │        │  └─────────────┬──────────────┘  │          │
+    │        │                │                  │          │
+    │        │                ▼                  │          │
+    │        │  Envoi TCP:8884 "TELEOP:DRIVE,    │          │
+    │        │   speed,angle" à 20 Hz max        │          │
+    │        └──────────────────────────────────┘          │
+    └──────────────────────────────────────────────────────┘
 
 ================================================================================
-3. MODE D'EMPLOI
+3. PROTOCOLE DE COMMANDES (TCP:8884)
 ================================================================================
 
-Prérequis :
-  - Pi et PC sur le même réseau WiFi
-  - Connaître l'IP de la Pi (ex: hostname -I sur la Pi)
-  - Python 3.9+, opencv-python installé sur le PC
+Format : messages texte UTF-8 terminés par \n
 
-ÉTAPE 1 — Sur la Raspberry Pi (via SSH) :
+  COMMANDE CONTINUE (utilisée par le client RC) :
+  ──────────────────────────────────────────────
+  TELEOP:DRIVE,<vitesse>,<angle>\n
 
-  # Terminal 1 : Lancer le C++ (moteurs)
-  cd ~/Voiture-Autonome-Qt/build
-  ./sae_sbc
+  Exemples :
+    TELEOP:DRIVE,0.1800,0.3000   → avancer à 18%, braquer 30% droite
+    TELEOP:DRIVE,0.0000,0.0000   → arrêt
+    TELEOP:DRIVE,-0.1200,0.5000  → reculer à 12%, braquer 50% droite
 
-  # Terminal 2 : Lancer le streaming vidéo
-  cd ~/Camera_arriere/python_camera
-  python3 video_streamer.py --rotate 180
+  Valeurs :
+    vitesse ∈ [-1.0, 1.0]   positif = avant, négatif = arrière
+    angle   ∈ [-1.0, 1.0]   négatif = gauche, positif = droite
 
-ÉTAPE 2 — Sur le PC Windows :
-
-  cd C:\...\Camera_arriere\python_camera
-  python teleop_client.py --pi-ip 192.168.1.42
-
-  (Remplacer 192.168.1.42 par l'IP réelle de la Pi)
-
-ÉTAPE 3 — Piloter :
-
-  Z = Avancer       S = Reculer
-  Q = Gauche         D = Droite
-  ESPACE = Arrêt total
-  ESC = Quitter
-
-La direction est PROGRESSIVE : chaque appui Q ou D tourne de 0.1.
-Espace remet vitesse ET angle à zéro.
+  COMMANDES DISCRÈTES (rétrocompatibilité) :
+  ──────────────────────────────────────────
+    TELEOP:FWD     → vitesse = 0.15
+    TELEOP:BWD     → vitesse = -0.10
+    TELEOP:LEFT    → angle -= 0.1
+    TELEOP:RIGHT   → angle += 0.1
+    TELEOP:STOP    → vitesse = 0, angle = 0
+    on / off       → active/désactive la boucle (legacy)
 
 ================================================================================
-4. POUR RÉACTIVER L'AUTONOMIE PLUS TARD
+4. CONTRÔLES RC (teleop_client.py)
 ================================================================================
 
-Dans controleur.h, changer :
-    bool modeManuel{true};   →   bool modeManuel{false};
+  Architecture multi-thread :
+  ─────────────────────────
+    Thread 1 (VideoReceiver) : réception JPEG continue, indépendant
+    Thread principal          : clavier + envoi commandes + affichage HUD
 
-Ou ajouter une commande TCP "AUTO:ON" dans onoff() qui fait :
-    modeManuel = false;
-    isRunning = true;
+    Avantage : le flux vidéo ne gèle JAMAIS même quand des touches
+    sont maintenues. Les touches sont COMBINABLES (Z+Q = avancer+gauche).
 
-Le code PID (computeError, pid.update, speedCtrl) est intact et fonctionnel.
+  Touches simultanées via bibliothèque 'keyboard' :
+  ─────────────────────────────────────────────────
+    Z         → accélérer (rampe progressive + kick-start initial de 6%)
+    S         → reculer  (rampe progressive + kick-start initial de 6%)
+    Q         → tourner à gauche (pas de 0.08 par tick)
+    D         → tourner à droite (pas de 0.08 par tick)
+    Z+Q       → avancer ET tourner gauche en même temps
+    Z+D       → avancer ET tourner droite en même temps
+    S+Q / S+D → reculer ET tourner
+    ESPACE    → arrêt d'urgence (vitesse = 0, angle = 0)
+    T         → test servo (cycle angles -1, -0.5, 0, +0.5, +1)
+    R         → recentrer la direction
+    ESC       → quitter
+
+  Chronogramme d'une commande :
+  ────────────────────────────
+    t=0.00s  Touche Z enfoncée
+    t=0.00s  speed = 0.06 (kick-start, franchit l'inertie)
+    t=0.03s  speed = 0.072 (+0.012 par tick à 30 Hz)
+    t=0.07s  speed = 0.084
+    ...      rampe progressive jusqu'à max 0.18
+    t=1.00s  Touche Z relâchée
+    t=1.03s  speed = 0.18 × 0.90 = 0.162 (décélération auto)
+    t=1.07s  speed = 0.162 × 0.90 = 0.146
+    ...      freinage progressif
+    t=2.50s  speed < 0.015 → speed = 0 (dead zone)
+
+  Paramètres ajustables (en tête de teleop_client.py) :
+  ─────────────────────────────────────────────────────
+    MAX_FWD_SPEED  = 0.18     # vitesse max avant
+    MAX_BWD_SPEED  = -0.12    # vitesse max arrière
+    ACCEL_STEP     = 0.012    # accélération par tick
+    KICK_START     = 0.06     # boost initial au démarrage
+    DECEL_FACTOR   = 0.90     # coefficient décélération
+    ANGLE_STEP     = 0.08     # incrément direction par tick
+    ANGLE_RETURN   = 0.04     # rappel au centre par tick
+
+================================================================================
+5. CHAÎNE DE COMMANDE SERVO (DIRECTION)
+================================================================================
+
+  teleop_client.py
+       │
+       │  TELEOP:DRIVE,0.18,0.50
+       ▼
+  ServeurTcp::getDatas()      → émet signal newDatas("TELEOP:DRIVE,0.18,0.50")
+       │
+       ▼
+  Controleur::onoff()         → détecte préfixe "TELEOP:" → handleManualCommand()
+       │
+       ▼
+  Controleur::handleManualCommand()  → parse speed=0.18, angle=0.50
+       │                              → emit deplacer(0.18, 0.50)
+       ▼
+  MaterielReel::deplacer()
+       │
+       ├──► setI2CMotor(0.18)        → I2C /dev/i2c-1, adresse 0x58 (MD04)
+       │                                 Dir: 2, Vitesse: 45
+       │
+       └──► direction.setPosition(0.50)
+                │
+                ▼
+            ServoMoteur::updatePos()
+                │  duty = (0.50 × 300 + 1500) × 1000 = 1650000 ns
+                │
+                ▼
+            PWM::setDuty(1650000)
+                │
+                ▼
+            Écrit dans /sys/class/pwm/pwmchip0/pwm0/duty_cycle
+                │
+                ▼
+            GPIO 18 (pin physique 12) ─── Signal PWM 50 Hz ──► Servo direction
+
+  Valeurs caractéristiques du servo :
+  ──────────────────────────────────
+    angle = -1.0  →  duty = (−1.0 × 470 + 1500) × 1000 = 1030000 ns = 1030 µs
+    angle =  0.0  →  duty = ( 0.0 × 300 + 1500) × 1000 = 1500000 ns = 1500 µs
+    angle = +1.0  →  duty = (+1.0 × 300 + 1500) × 1000 = 1800000 ns = 1800 µs
+
+================================================================================
+6. CONFIGURATION MATÉRIELLE (RASPBERRY PI 4)
+================================================================================
+
+  /boot/firmware/config.txt :
+  ─────────────────────────
+    dtparam=i2c_arm=on
+    dtoverlay=pwm-2chan,pin=18,func=2,pin2=19,func2=2
+
+  Broches utilisées :
+  ──────────────────
+    GPIO 18 (pin 12)   → PWM0 (servo direction) via dtoverlay
+    SDA1 / SCL1        → I2C bus 1 (moteur MD04, adresse 0x58)
+    /dev/ttyUSB0       → LIDAR RPLidar (USB)
+    /dev/ttyAMA1       → TFmini (UART)
+    CSI                → Picamera2
+
+  Résolution du problème PWM :
+  ───────────────────────────
+    Problème : le code original utilisait pwmchip2/channel2 (inexistant)
+    
+    Étape 1 : dtoverlay=pwm-2chan,pin=12 → crée pwmchip0 mais servo
+              ne répond pas (pas le bon GPIO)
+    Étape 2 : dtoverlay=pwm-2chan,pin=18 → servo répond sur pwmchip0/pwm0
+              Le servo est physiquement câblé sur GPIO 18 (pin 12)
+    
+    Solution finale : pwmchip0, channel 0, overlay pin=18
+
+================================================================================
+7. PROBLÈMES RÉSOLUS
+================================================================================
+
+  [1] VNC à 1-2 FPS → JPEG-over-TCP à 30 FPS
+  [2] Segfault LIDAR → null-guard drv + timer stop
+  [3] PWM chip/canal → pwmchip0/pwm0 (était pwmchip2/pwm2)
+  [4] GPIO servo     → GPIO 18 pin=18,func=2 (pas GPIO 12)
+  [5] I2C init MD04  → stabilisation au bout de quelques secondes
+  [6] Stream gelé    → VideoReceiver en thread séparé
+  [7] 1 touche max   → bibliothèque keyboard (touches simultanées)
+  [8] Démarrage mou  → kick-start de 6% au premier appui
+
+================================================================================
+8. FICHIERS MODIFIÉS / CRÉÉS
+================================================================================
+
+  C++ (repo Voiture-Autonome-Qt) :
+
+    controleur.h/cpp
+      - modeManuel, manualSpeed, manualAngle
+      - handleManualCommand() : parse TELEOP:DRIVE + commandes discrètes
+      - newDatas() : bypass PID en mode manuel
+
+    materielreel.h/cpp
+      - ServoMoteur direction{0,...} (canal PWM corrigé)
+      - Null-guard LIDAR + timer stop
+      - setMotorSpeed/startScan dans le bloc succès
+
+    servomoteur.cpp
+      - pwm(0, ...) au lieu de pwm(2, ...)
+      - Debug output [SERVO] avec duty cycle
+
+    pwm.cpp
+      - Debug output [PWM] avec sysfs path et valeurs
+
+  Python (repo Camera_arriere) :
+
+    video_streamer.py  [NOUVEAU]
+      - Serveur streaming JPEG-over-TCP port 8885
+
+    teleop_client.py   [NOUVEAU]
+      - Client téléopération multi-thread
+      - Bibliothèque keyboard pour touches simultanées
+      - HUD avec FPS, vitesse, angle, barre direction
+
+    test_servo_gpio.py [NOUVEAU]
+      - Script de diagnostic PWM (test des canaux)
+
+================================================================================
+9. POUR RÉACTIVER L'AUTONOMIE
+================================================================================
+
+  Dans controleur.h, changer :
+      bool modeManuel{true};   →   bool modeManuel{false};
+
+  Ou ajouter une commande TCP "AUTO:ON" dans handleManualCommand() :
+      modeManuel = false;
+      isRunning = true;
+
+  Le code PID (computeError, pid.update, speedCtrl) est 100% intact.
 
 ================================================================================
