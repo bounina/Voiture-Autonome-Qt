@@ -2,8 +2,8 @@
 """
 teleop_client.py — Client de téléopération RC (PC Windows).
 
-Utilise la bibliothèque 'keyboard' pour détecter les touches simultanées
-et éviter de bloquer le flux vidéo.
+Utilise l'API Windows GetAsyncKeyState pour détecter les touches simultanées
+sans bloquer le flux vidéo (zéro hook, zéro thread, zéro latence).
 
 Contrôles :
   Z = accélérer (rampe progressive, kick-start au démarrage)
@@ -13,9 +13,10 @@ Contrôles :
   ESPACE = arrêt d'urgence
   T = test servo (cycle angles)
   R = recentrer direction
+  O = overlay parking on/off
   ESC = quitter
 
-Dépendances : pip install opencv-python numpy keyboard
+Dépendances : pip install opencv-python numpy
 
 Usage :
     python teleop_client.py --pi-ip 192.168.1.42
@@ -24,6 +25,7 @@ Usage :
 from __future__ import annotations
 
 import argparse
+import ctypes
 import socket
 import struct
 import sys
@@ -33,24 +35,22 @@ import time
 import cv2
 import numpy as np
 
-try:
-    import keyboard
-except ImportError:
-    print("ERREUR: Installe le module keyboard :")
-    print("  pip install keyboard")
-    sys.exit(1)
+# ======== KEYBOARD — Windows GetAsyncKeyState (zero overhead) ========
+_user32 = ctypes.windll.user32  # type: ignore[attr-defined]
 
-# ======== KEYBOARD STATE (callback-based, non-blocking) ========
-_key_state: dict[str, bool] = {}
-
-def _on_key_event(event):
-    _key_state[event.name] = (event.event_type == 'down')
-
-keyboard.hook(_on_key_event)
+# Virtual-key codes for AZERTY layout
+_VK = {
+    'z': 0x5A, 's': 0x53, 'q': 0x51, 'd': 0x44,
+    'space': 0x20, 'esc': 0x1B,
+    't': 0x54, 'r': 0x52, 'o': 0x4F,
+}
 
 def is_key(name: str) -> bool:
-    """Non-blocking key state check (reads dict, no library call)."""
-    return _key_state.get(name, False)
+    """Check if a key is currently held down (direct Windows API, non-blocking)."""
+    vk = _VK.get(name)
+    if vk is None:
+        return False
+    return bool(_user32.GetAsyncKeyState(vk) & 0x8000)
 
 WINDOW_NAME = "Teleop - Voiture Autonome"
 
