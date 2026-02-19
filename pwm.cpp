@@ -80,6 +80,8 @@ PWM::PWM(const int pwmChip, const int pwmChannel, int Fmli)
         enableFile.close();
     }
 
+    qDebug() << "[PWM] Init OK:" << pwmDir.absolutePath()
+             << "period=" << period << "ns (" << Fmli << "Hz)";
 }
 
 void PWM::setDuty(int duty)
@@ -88,9 +90,16 @@ void PWM::setDuty(int duty)
     {
         outRapportCylicque<<QString::number(duty);
         outRapportCylicque.flush();
+        // Debug: log toutes les 50 écritures
+        static int pwmLogCounter = 0;
+        if (++pwmLogCounter % 50 == 0) {
+            qDebug() << "[PWM] duty_cycle =" << duty << "ns"
+                     << "(" << (duty / 1000) << "us)"
+                     << "file:" << rapportCycliqueFile.fileName();
+        }
     }
     else
     {
-        qDebug()<<"erreur duty cycle !";
+        qDebug()<<"erreur duty cycle ! duty=" << duty << " > period=" << period;
     }
 }

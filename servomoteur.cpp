@@ -17,6 +17,9 @@ void ServoMoteur::updatePos()
 {
     double gain = (pos >= 0) ? gainPosDuty_us : gainNegDuty_us;
     float duty = (pos * gain + centerDuty_us) * 1000;
+    qDebug() << "[SERVO] pos=" << pos << "-> duty=" << static_cast<int>(duty)
+             << "ns (" << static_cast<int>(duty/1000) << "us)"
+             << "center=" << centerDuty_us << "gain=" << gain;
     pwm.setDuty(static_cast<int>(duty));
 }
 
