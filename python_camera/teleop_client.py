@@ -68,16 +68,78 @@ ANGLE_RETURN   = 0.04     # rappel au centre par tick
 
 CONTROL_HZ     = 30       # fréquence de la boucle de contrôle
 
-# ======== OVERLAY PARKING ========
-# Distances en pixels (proportionnelles à la hauteur de l'image)
-# Zone verte = loin, jaune = moyen, rouge = proche
-OVERLAY_COLORS = {
-    "green":  (0, 200, 80),
-    "yellow": (0, 220, 255),
-    "red":    (0, 50, 255),
-    "guide":  (255, 255, 255),
-    "marker": (200, 200, 200),
+# ======== OVERLAY PARKING — CALIBRÉ (scotch bleu 20cm/40cm/60cm) ========
+# Calibration basée sur mesures réelles :
+#   20cm de la caméra → y ≈ 82% de l'image = 0.82
+#   40cm de la caméra → y ≈ 65% de l'image = 0.65
+#   60cm de la caméra → y ≈ 52% de l'image = 0.52
+# Largeur scotch (20cm) à 20cm distance → ~25% de la largeur frame
+CALIB = {
+    # (distance_cm, y_fraction_from_top, px_per_cm_at_this_distance)
+    "points": [
+        (20, 0.82, 8.0),   # 20cm → y=82%, ~160px pour 20cm = 8px/cm
+        (40, 0.65, 5.5),   # 40cm → y=65%, ~110px pour 20cm = 5.5px/cm
+        (60, 0.52, 4.0),   # 60cm → y=52%, ~80px pour 20cm = 4px/cm
+    ],
 }
+
+# Premium color palette (BMW/Mercedes style)
+OEM_COLORS = {
+    "danger":     (48, 50, 220),    # rouge doux
+    "caution":    (55, 190, 235),   # ambre chaud
+    "safe":       (80, 190, 60),    # vert doux
+    "guide":      (230, 230, 230),  # blanc cassé
+    "trajectory": (60, 180, 255),   # orange doré
+    "center":     (200, 220, 255),  # jaune pâle
+    "label_bg":   (30, 30, 30),     # fond label
+    "label_txt":  (220, 220, 220),  # texte label
+    "bumper":     (100, 100, 100),  # indicateur pare-choc
+}
+
+
+def _lerp(a: float, b: float, t: float) -> float:
+    """Linear interpolation."""
+    return a + (b - a) * t
+
+
+def _y_for_dist(h: int, dist_cm: float) -> int:
+    """Interpolate Y pixel for a real distance using calibration points."""
+    pts = CALIB["points"]
+    # Clamp to calibration range
+    if dist_cm <= pts[0][0]:
+        return int(h * pts[0][1])
+    if dist_cm >= pts[-1][0]:
+        return int(h * pts[-1][1])
+    # Interpolate between calibration points
+    for i in range(len(pts) - 1):
+        d0, y0, _ = pts[i]
+        d1, y1, _ = pts[i + 1]
+        if d0 <= dist_cm <= d1:
+            t = (dist_cm - d0) / (d1 - d0)
+            return int(h * _lerp(y0, y1, t))
+    return int(h * pts[-1][1])
+
+
+def _half_width_at_dist(w: int, dist_cm: float, car_half_cm: float) -> int:
+    """Compute half-width in pixels at a given distance using calibration."""
+    pts = CALIB["points"]
+    # Interpolate px/cm ratio
+    if dist_cm <= pts[0][0]:
+        ppcm = pts[0][2]
+    elif dist_cm >= pts[-1][0]:
+        ppcm = pts[-1][2]
+    else:
+        for i in range(len(pts) - 1):
+            d0, _, p0 = pts[i]
+            d1, _, p1 = pts[i + 1]
+            if d0 <= dist_cm <= d1:
+                t = (dist_cm - d0) / (d1 - d0)
+                ppcm = _lerp(p0, p1, t)
+                break
+        else:
+            ppcm = pts[-1][2]
+    return int(car_half_cm * ppcm)
+
 
 
 def parse_args() -> argparse.Namespace:
@@ -144,7 +206,7 @@ def draw_hud(frame: np.ndarray, fps: float, speed: float, angle: float,
     """Draw HUD in-place (no copy)."""
     h, w = frame.shape[:2]
 
-    # Dark bar (lightweight: just draw a filled rect with low alpha)
+    # Dark bar
     sub = frame[0:130, 0:w]
     sub[:] = (sub * 0.4 + np.array([20, 20, 20]) * 0.6).astype(np.uint8)
 
@@ -182,81 +244,120 @@ def draw_hud(frame: np.ndarray, fps: float, speed: float, angle: float,
 
 def draw_parking_overlay(frame: np.ndarray, steering: float,
                          car_width_ratio: float = 0.30) -> None:
-    """Draw OEM-style parking overlay in-place (no copy)."""
+    """Draw premium OEM-style parking overlay, calibrated to real distances."""
     h, w = frame.shape[:2]
     cx = w // 2
-    n_samples = 40  # reduced for performance
+    car_half_cm = (car_width_ratio * 65.0) / 2  # convert ratio back to cm
 
-    zone_bottom = h
-    red_top     = int(h * 0.80)
-    yellow_top  = int(h * 0.65)
-    green_top   = int(h * 0.50)
-    half_car = int(w * car_width_ratio / 2)
+    # ── Distance markers (calibrated, every 20cm) ──
+    markers = [
+        (20, "20 cm", OEM_COLORS["danger"]),
+        (40, "40 cm", OEM_COLORS["caution"]),
+        (60, "60 cm", OEM_COLORS["safe"]),
+    ]
 
-    # ── Colored zones (draw directly with low-alpha blend on ROI) ──
-    # Red zone
-    roi_red = frame[red_top:zone_bottom, cx - half_car:cx + half_car]
-    if roi_red.size > 0:
-        roi_red[:] = cv2.addWeighted(roi_red, 0.85, np.full_like(roi_red, OVERLAY_COLORS["red"]), 0.15, 0)
+    # ── Zone shading (gradient between markers) ──
+    # Danger zone: bottom to 20cm
+    y_bottom = h
+    y_20 = _y_for_dist(h, 20)
+    y_40 = _y_for_dist(h, 40)
+    y_60 = _y_for_dist(h, 60)
 
-    # Yellow zone (approximate as rectangle)
-    spread_y = int(half_car * 1.05)
-    y_left = min(cx - spread_y, cx - half_car)
-    y_right = max(cx + spread_y, cx + half_car)
-    roi_yellow = frame[yellow_top:red_top, y_left:y_right]
-    if roi_yellow.size > 0:
-        roi_yellow[:] = cv2.addWeighted(roi_yellow, 0.85, np.full_like(roi_yellow, OVERLAY_COLORS["yellow"]), 0.15, 0)
+    # Semi-transparent zone fills
+    for y_top, y_bot, color, alpha in [
+        (y_20, y_bottom, OEM_COLORS["danger"], 0.12),
+        (y_40, y_20,     OEM_COLORS["caution"], 0.10),
+        (y_60, y_40,     OEM_COLORS["safe"],    0.08),
+    ]:
+        if y_bot > y_top > 0:
+            hw_top = _half_width_at_dist(w, (y_bottom - y_top) / (y_bottom - y_60) * 60, car_half_cm)
+            hw_bot = _half_width_at_dist(w, (y_bottom - y_bot) / max(1, y_bottom - y_60) * 60, car_half_cm)
+            # Simple rectangular ROI blend (fast)
+            hw_max = max(hw_top, hw_bot) + 10
+            x1 = max(0, cx - hw_max)
+            x2 = min(w, cx + hw_max)
+            roi = frame[y_top:y_bot, x1:x2]
+            if roi.size > 0:
+                tint = np.full_like(roi, color)
+                cv2.addWeighted(roi, 1.0 - alpha, tint, alpha, 0, roi)
 
-    # Green zone
-    spread_g = int(half_car * 1.12)
-    g_left = min(cx - spread_g, y_left)
-    g_right = max(cx + spread_g, y_right)
-    roi_green = frame[green_top:yellow_top, g_left:g_right]
-    if roi_green.size > 0:
-        roi_green[:] = cv2.addWeighted(roi_green, 0.85, np.full_like(roi_green, OVERLAY_COLORS["green"]), 0.15, 0)
+    # ── Static guide lines (vehicle width, perspective-correct) ──
+    n_pts = 35
+    left_pts = np.empty((n_pts, 2), dtype=np.int32)
+    right_pts = np.empty((n_pts, 2), dtype=np.int32)
+    for i in range(n_pts):
+        t = i / (n_pts - 1)
+        dist_cm = 10 + t * 55  # 10cm to 65cm range
+        y = _y_for_dist(h, dist_cm)
+        hw = _half_width_at_dist(w, dist_cm, car_half_cm)
+        left_pts[i] = (cx - hw, y)
+        right_pts[i] = (cx + hw, y)
 
-    # ── Guide lines (vehicle width) ──
-    left_pts = np.empty((n_samples, 2), dtype=np.int32)
-    right_pts = np.empty((n_samples, 2), dtype=np.int32)
-    for i in range(n_samples):
-        t = i / (n_samples - 1)
-        y = int(zone_bottom - t * (zone_bottom - green_top))
-        spread = half_car * (1.0 + t * 0.15)
-        left_pts[i] = (int(cx - spread), y)
-        right_pts[i] = (int(cx + spread), y)
-    cv2.polylines(frame, [left_pts], False, OVERLAY_COLORS["guide"], 2, cv2.LINE_AA)
-    cv2.polylines(frame, [right_pts], False, OVERLAY_COLORS["guide"], 2, cv2.LINE_AA)
+    # Guide line glow effect (thick dim line + thin bright line)
+    cv2.polylines(frame, [left_pts], False, (80, 80, 80), 4, cv2.LINE_AA)
+    cv2.polylines(frame, [right_pts], False, (80, 80, 80), 4, cv2.LINE_AA)
+    cv2.polylines(frame, [left_pts], False, OEM_COLORS["guide"], 2, cv2.LINE_AA)
+    cv2.polylines(frame, [right_pts], False, OEM_COLORS["guide"], 2, cv2.LINE_AA)
 
-    # ── Distance markers ──
-    for y_frac, label, color in [(0.85, "10cm", OVERLAY_COLORS["red"]),
-                                  (0.75, "20cm", OVERLAY_COLORS["yellow"]),
-                                  (0.65, "30cm", OVERLAY_COLORS["yellow"]),
-                                  (0.55, "40cm", OVERLAY_COLORS["green"])]:
-        y_px = int(h * y_frac)
-        t = (zone_bottom - y_px) / max(1, zone_bottom - green_top)
-        sp = half_car * (1.0 + t * 0.15)
-        xl, xr = int(cx - sp), int(cx + sp)
-        cv2.line(frame, (xl, y_px), (xr, y_px), color, 1, cv2.LINE_AA)
-        cv2.putText(frame, label, (xr + 5, y_px + 4),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (230, 230, 230), 1, cv2.LINE_AA)
+    # ── Distance marker lines + labels ──
+    for dist_cm, label, color in markers:
+        y = _y_for_dist(h, dist_cm)
+        hw = _half_width_at_dist(w, dist_cm, car_half_cm)
+        xl, xr = cx - hw, cx + hw
 
-    # ── Dynamic trajectory curves ──
-    steer_norm = max(-1.0, min(1.0, steering))
-    if abs(steer_norm) > 0.02:
-        tl = np.empty((n_samples, 2), dtype=np.int32)
-        tr = np.empty((n_samples, 2), dtype=np.int32)
-        tc = np.empty((n_samples, 2), dtype=np.int32)
-        for i in range(n_samples):
-            t = i / (n_samples - 1)
-            y = int(zone_bottom - t * (zone_bottom - green_top))
-            x_off = int(steer_norm * (t ** 2) * w * 0.25)
-            spread = half_car * (1.0 + t * 0.15)
-            tl[i] = (int(cx - spread + x_off), y)
-            tr[i] = (int(cx + spread + x_off), y)
+        # Marker line with glow
+        cv2.line(frame, (xl, y), (xr, y), (40, 40, 40), 3, cv2.LINE_AA)
+        cv2.line(frame, (xl, y), (xr, y), color, 2, cv2.LINE_AA)
+
+        # Small ticks at ends
+        cv2.line(frame, (xl, y - 5), (xl, y + 5), color, 2, cv2.LINE_AA)
+        cv2.line(frame, (xr, y - 5), (xr, y + 5), color, 2, cv2.LINE_AA)
+
+        # Pill-shaped label background
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+        lx = xr + 8
+        ly = y
+        # Rounded rectangle background
+        pad = 4
+        cv2.rectangle(frame, (lx - pad, ly - th - pad), (lx + tw + pad, ly + pad + 2),
+                      OEM_COLORS["label_bg"], -1, cv2.LINE_AA)
+        cv2.rectangle(frame, (lx - pad, ly - th - pad), (lx + tw + pad, ly + pad + 2),
+                      color, 1, cv2.LINE_AA)
+        cv2.putText(frame, label, (lx, ly),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, OEM_COLORS["label_txt"], 1, cv2.LINE_AA)
+
+    # ── Bumper indicator (bottom center) ──
+    bumper_y = h - 8
+    bumper_hw = _half_width_at_dist(w, 5, car_half_cm)
+    cv2.line(frame, (cx - bumper_hw, bumper_y), (cx + bumper_hw, bumper_y),
+             OEM_COLORS["bumper"], 4, cv2.LINE_AA)
+    cv2.line(frame, (cx - bumper_hw, bumper_y), (cx + bumper_hw, bumper_y),
+             OEM_COLORS["guide"], 2, cv2.LINE_AA)
+
+    # ── Dynamic trajectory curves (follow steering) ──
+    steer = max(-1.0, min(1.0, steering))
+    if abs(steer) > 0.02:
+        tl = np.empty((n_pts, 2), dtype=np.int32)
+        tr = np.empty((n_pts, 2), dtype=np.int32)
+        tc = np.empty((n_pts, 2), dtype=np.int32)
+        for i in range(n_pts):
+            t = i / (n_pts - 1)
+            dist_cm = 10 + t * 55
+            y = _y_for_dist(h, dist_cm)
+            hw = _half_width_at_dist(w, dist_cm, car_half_cm)
+            # Quadratic lateral shift (more curvature at distance)
+            x_off = int(steer * (t ** 2) * w * 0.22)
+            tl[i] = (cx - hw + x_off, y)
+            tr[i] = (cx + hw + x_off, y)
             tc[i] = (cx + x_off, y)
-        cv2.polylines(frame, [tl], False, (0, 180, 255), 2, cv2.LINE_AA)
-        cv2.polylines(frame, [tr], False, (0, 180, 255), 2, cv2.LINE_AA)
-        cv2.polylines(frame, [tc], False, (255, 255, 0), 1, cv2.LINE_AA)
+
+        # Trajectory glow
+        cv2.polylines(frame, [tl], False, (30, 80, 120), 4, cv2.LINE_AA)
+        cv2.polylines(frame, [tr], False, (30, 80, 120), 4, cv2.LINE_AA)
+        cv2.polylines(frame, [tl], False, OEM_COLORS["trajectory"], 2, cv2.LINE_AA)
+        cv2.polylines(frame, [tr], False, OEM_COLORS["trajectory"], 2, cv2.LINE_AA)
+        # Center trajectory (dashed effect via thin line)
+        cv2.polylines(frame, [tc], False, OEM_COLORS["center"], 1, cv2.LINE_AA)
 
 
 class VideoReceiver(threading.Thread):
