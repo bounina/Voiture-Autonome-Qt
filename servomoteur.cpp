@@ -1,4 +1,5 @@
 #include "servomoteur.h"
+#include <QDebug>
 
 ServoMoteur::ServoMoteur(const int pwmChannel,
                          const int _centerDuty_us,
