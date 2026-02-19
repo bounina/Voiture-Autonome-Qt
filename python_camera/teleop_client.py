@@ -40,6 +40,18 @@ except ImportError:
     print("  pip install keyboard")
     sys.exit(1)
 
+# ======== KEYBOARD STATE (callback-based, non-blocking) ========
+_key_state: dict[str, bool] = {}
+
+def _on_key_event(event):
+    _key_state[event.name] = (event.event_type == 'down')
+
+keyboard.hook(_on_key_event)
+
+def is_key(name: str) -> bool:
+    """Non-blocking key state check (reads dict, no library call)."""
+    return _key_state.get(name, False)
+
 WINDOW_NAME = "Teleop - Voiture Autonome"
 
 # ======== PARAMÈTRES DE CONDUITE RC ========
@@ -128,183 +140,123 @@ def send_command(sock: socket.socket | None, cmd: str) -> bool:
 
 
 def draw_hud(frame: np.ndarray, fps: float, speed: float, angle: float,
-             video_ok: bool, cmd_ok: bool, throttle_state: str) -> np.ndarray:
-    out = frame.copy()
-    h, w = out.shape[:2]
+             video_ok: bool, cmd_ok: bool, throttle_state: str) -> None:
+    """Draw HUD in-place (no copy)."""
+    h, w = frame.shape[:2]
 
-    # Dark bar
-    overlay = out.copy()
-    cv2.rectangle(overlay, (0, 0), (w, 130), (20, 20, 20), -1)
-    cv2.addWeighted(overlay, 0.6, out, 0.4, 0, out)
+    # Dark bar (lightweight: just draw a filled rect with low alpha)
+    sub = frame[0:130, 0:w]
+    sub[:] = (sub * 0.4 + np.array([20, 20, 20]) * 0.6).astype(np.uint8)
 
     # Status
     vid_color = (0, 255, 0) if video_ok else (0, 0, 255)
     cmd_color = (0, 255, 0) if cmd_ok else (0, 0, 255)
-    cv2.putText(out, f"FPS: {fps:.0f}", (10, 28),
+    cv2.putText(frame, f"FPS: {fps:.0f}", (10, 28),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
-    cv2.putText(out, f"VIDEO: {'OK' if video_ok else 'LOST'}", (150, 28),
+    cv2.putText(frame, f"VIDEO: {'OK' if video_ok else 'LOST'}", (150, 28),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, vid_color, 2, cv2.LINE_AA)
-    cv2.putText(out, f"CMD: {'OK' if cmd_ok else 'DISCONN'}", (370, 28),
+    cv2.putText(frame, f"CMD: {'OK' if cmd_ok else 'DISCONN'}", (370, 28),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, cmd_color, 2, cv2.LINE_AA)
 
     # Speed
     speed_pct = abs(speed) / MAX_FWD_SPEED * 100
     speed_color = (0, 255, 0) if speed > 0 else ((0, 100, 255) if speed < 0 else (200, 200, 200))
-    cv2.putText(out, f"Speed: {speed_pct:.0f}% ({throttle_state})", (10, 62),
+    cv2.putText(frame, f"Speed: {speed_pct:.0f}% ({throttle_state})", (10, 62),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.65, speed_color, 2, cv2.LINE_AA)
 
     # Angle
-    cv2.putText(out, f"Angle: {angle:+.2f}", (10, 92),
+    cv2.putText(frame, f"Angle: {angle:+.2f}", (10, 92),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
 
     # Steering bar
     bar_cx, bar_y, bar_hw = w // 2, 118, 150
-    cv2.line(out, (bar_cx - bar_hw, bar_y), (bar_cx + bar_hw, bar_y),
+    cv2.line(frame, (bar_cx - bar_hw, bar_y), (bar_cx + bar_hw, bar_y),
              (100, 100, 100), 3, cv2.LINE_AA)
     needle_x = int(bar_cx + angle * bar_hw)
-    cv2.circle(out, (needle_x, bar_y), 8, (0, 200, 255), -1, cv2.LINE_AA)
+    cv2.circle(frame, (needle_x, bar_y), 8, (0, 200, 255), -1, cv2.LINE_AA)
 
     # Help
-    overlay_txt = "O:Overlay" if True else ""
-    cv2.putText(out, f"Z:Accel S:Recule Q+D:Direction ESPACE:Stop T:Test R:Centre {overlay_txt} ESC:Quit",
+    cv2.putText(frame, "Z:Accel S:Recule Q+D:Direction ESPACE:Stop O:Overlay ESC:Quit",
                 (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (180, 180, 180), 1, cv2.LINE_AA)
-
-    return out
 
 
 def draw_parking_overlay(frame: np.ndarray, steering: float,
-                         car_width_ratio: float = 0.30) -> np.ndarray:
-    """Draw OEM-style parking overlay with distance zones and dynamic curves.
-
-    Args:
-        frame: BGR frame
-        steering: normalized steering angle [-1.0, +1.0]
-        car_width_ratio: car width as fraction of frame width (~0.30)
-    """
-    out = frame.copy()
-    h, w = out.shape[:2]
+                         car_width_ratio: float = 0.30) -> None:
+    """Draw OEM-style parking overlay in-place (no copy)."""
+    h, w = frame.shape[:2]
     cx = w // 2
+    n_samples = 40  # reduced for performance
 
-    # ── Zone proportions (from bottom of frame) ──
-    # Red zone:   bottom 20% of frame
-    # Yellow zone: next 15%
-    # Green zone:  next 15%
-    zone_bottom = h          # bottom of frame
+    zone_bottom = h
     red_top     = int(h * 0.80)
     yellow_top  = int(h * 0.65)
     green_top   = int(h * 0.50)
-
-    # Car width in pixels
     half_car = int(w * car_width_ratio / 2)
 
-    # ── Draw colored zones (semi-transparent) ──
-    overlay_layer = out.copy()
-
+    # ── Colored zones (draw directly with low-alpha blend on ROI) ──
     # Red zone
-    pts_red = np.array([
-        [cx - half_car, zone_bottom],
-        [cx + half_car, zone_bottom],
-        [cx + half_car, red_top],
-        [cx - half_car, red_top],
-    ], np.int32)
-    cv2.fillPoly(overlay_layer, [pts_red], OVERLAY_COLORS["red"])
+    roi_red = frame[red_top:zone_bottom, cx - half_car:cx + half_car]
+    if roi_red.size > 0:
+        roi_red[:] = cv2.addWeighted(roi_red, 0.85, np.full_like(roi_red, OVERLAY_COLORS["red"]), 0.15, 0)
 
-    # Yellow zone (slightly wider at top due to perspective)
+    # Yellow zone (approximate as rectangle)
     spread_y = int(half_car * 1.05)
-    pts_yellow = np.array([
-        [cx - half_car, red_top],
-        [cx + half_car, red_top],
-        [cx + spread_y, yellow_top],
-        [cx - spread_y, yellow_top],
-    ], np.int32)
-    cv2.fillPoly(overlay_layer, [pts_yellow], OVERLAY_COLORS["yellow"])
+    y_left = min(cx - spread_y, cx - half_car)
+    y_right = max(cx + spread_y, cx + half_car)
+    roi_yellow = frame[yellow_top:red_top, y_left:y_right]
+    if roi_yellow.size > 0:
+        roi_yellow[:] = cv2.addWeighted(roi_yellow, 0.85, np.full_like(roi_yellow, OVERLAY_COLORS["yellow"]), 0.15, 0)
 
-    # Green zone (wider still)
+    # Green zone
     spread_g = int(half_car * 1.12)
-    pts_green = np.array([
-        [cx - spread_y, yellow_top],
-        [cx + spread_y, yellow_top],
-        [cx + spread_g, green_top],
-        [cx - spread_g, green_top],
-    ], np.int32)
-    cv2.fillPoly(overlay_layer, [pts_green], OVERLAY_COLORS["green"])
+    g_left = min(cx - spread_g, y_left)
+    g_right = max(cx + spread_g, y_right)
+    roi_green = frame[green_top:yellow_top, g_left:g_right]
+    if roi_green.size > 0:
+        roi_green[:] = cv2.addWeighted(roi_green, 0.85, np.full_like(roi_green, OVERLAY_COLORS["green"]), 0.15, 0)
 
-    # Blend zones
-    cv2.addWeighted(overlay_layer, 0.18, out, 0.82, 0, out)
-
-    # ── Guide lines (vehicle width, fixed) ──
-    # Left guide
-    left_pts = []
-    right_pts = []
-    n_samples = 60
+    # ── Guide lines (vehicle width) ──
+    left_pts = np.empty((n_samples, 2), dtype=np.int32)
+    right_pts = np.empty((n_samples, 2), dtype=np.int32)
     for i in range(n_samples):
-        t = i / (n_samples - 1)  # 0 = bottom, 1 = top
+        t = i / (n_samples - 1)
         y = int(zone_bottom - t * (zone_bottom - green_top))
-        # Slight perspective convergence
         spread = half_car * (1.0 + t * 0.15)
-        left_pts.append((int(cx - spread), y))
-        right_pts.append((int(cx + spread), y))
+        left_pts[i] = (int(cx - spread), y)
+        right_pts[i] = (int(cx + spread), y)
+    cv2.polylines(frame, [left_pts], False, OVERLAY_COLORS["guide"], 2, cv2.LINE_AA)
+    cv2.polylines(frame, [right_pts], False, OVERLAY_COLORS["guide"], 2, cv2.LINE_AA)
 
-    left_arr = np.array(left_pts, dtype=np.int32)
-    right_arr = np.array(right_pts, dtype=np.int32)
-    cv2.polylines(out, [left_arr], False, OVERLAY_COLORS["guide"], 2, cv2.LINE_AA)
-    cv2.polylines(out, [right_arr], False, OVERLAY_COLORS["guide"], 2, cv2.LINE_AA)
-
-    # ── Distance markers (horizontal lines) ──
-    marker_positions = [
-        (0.85, "10cm", OVERLAY_COLORS["red"]),
-        (0.75, "20cm", OVERLAY_COLORS["yellow"]),
-        (0.65, "30cm", OVERLAY_COLORS["yellow"]),
-        (0.55, "40cm", OVERLAY_COLORS["green"]),
-    ]
-    for y_frac, label, color in marker_positions:
+    # ── Distance markers ──
+    for y_frac, label, color in [(0.85, "10cm", OVERLAY_COLORS["red"]),
+                                  (0.75, "20cm", OVERLAY_COLORS["yellow"]),
+                                  (0.65, "30cm", OVERLAY_COLORS["yellow"]),
+                                  (0.55, "40cm", OVERLAY_COLORS["green"])]:
         y_px = int(h * y_frac)
         t = (zone_bottom - y_px) / max(1, zone_bottom - green_top)
-        spread = half_car * (1.0 + t * 0.15)
-        x_left = int(cx - spread)
-        x_right = int(cx + spread)
-        cv2.line(out, (x_left, y_px), (x_right, y_px), color, 1, cv2.LINE_AA)
-        # Label with background
-        (tw, th_txt), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
-        lx = x_right + 5
-        ly = y_px + 4
-        cv2.rectangle(out, (lx - 2, ly - th_txt - 2), (lx + tw + 2, ly + 4),
-                      (20, 20, 20), -1)
-        cv2.putText(out, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
-                    (230, 230, 230), 1, cv2.LINE_AA)
+        sp = half_car * (1.0 + t * 0.15)
+        xl, xr = int(cx - sp), int(cx + sp)
+        cv2.line(frame, (xl, y_px), (xr, y_px), color, 1, cv2.LINE_AA)
+        cv2.putText(frame, label, (xr + 5, y_px + 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (230, 230, 230), 1, cv2.LINE_AA)
 
-    # ── Dynamic trajectory curves (follow steering angle) ──
+    # ── Dynamic trajectory curves ──
     steer_norm = max(-1.0, min(1.0, steering))
-    if abs(steer_norm) > 0.02:  # Don't draw curves when nearly straight
-        traj_left = []
-        traj_right = []
+    if abs(steer_norm) > 0.02:
+        tl = np.empty((n_samples, 2), dtype=np.int32)
+        tr = np.empty((n_samples, 2), dtype=np.int32)
+        tc = np.empty((n_samples, 2), dtype=np.int32)
         for i in range(n_samples):
             t = i / (n_samples - 1)
             y = int(zone_bottom - t * (zone_bottom - green_top))
-            # Quadratic displacement: more curve at distance
-            x_offset = int(steer_norm * (t ** 2) * w * 0.25)
+            x_off = int(steer_norm * (t ** 2) * w * 0.25)
             spread = half_car * (1.0 + t * 0.15)
-            traj_left.append((int(cx - spread + x_offset), y))
-            traj_right.append((int(cx + spread + x_offset), y))
-
-        tl_arr = np.array(traj_left, dtype=np.int32)
-        tr_arr = np.array(traj_right, dtype=np.int32)
-        # Draw dashed dynamic curves
-        traj_color = (0, 180, 255)  # orange
-        cv2.polylines(out, [tl_arr], False, traj_color, 2, cv2.LINE_AA)
-        cv2.polylines(out, [tr_arr], False, traj_color, 2, cv2.LINE_AA)
-
-        # Trajectory center line
-        center_pts = []
-        for i in range(n_samples):
-            t = i / (n_samples - 1)
-            y = int(zone_bottom - t * (zone_bottom - green_top))
-            x_offset = int(steer_norm * (t ** 2) * w * 0.25)
-            center_pts.append((cx + x_offset, y))
-        center_arr = np.array(center_pts, dtype=np.int32)
-        cv2.polylines(out, [center_arr], False, (255, 255, 0), 1, cv2.LINE_AA)
-
-    return out
+            tl[i] = (int(cx - spread + x_off), y)
+            tr[i] = (int(cx + spread + x_off), y)
+            tc[i] = (cx + x_off, y)
+        cv2.polylines(frame, [tl], False, (0, 180, 255), 2, cv2.LINE_AA)
+        cv2.polylines(frame, [tr], False, (0, 180, 255), 2, cv2.LINE_AA)
+        cv2.polylines(frame, [tc], False, (255, 255, 0), 1, cv2.LINE_AA)
 
 
 class VideoReceiver(threading.Thread):
@@ -397,52 +349,51 @@ def main() -> int:
             # ── Keyboard (simultaneous via keyboard library) ──
             throttle_active = False
 
-            if keyboard.is_pressed('esc'):
+            if is_key('esc'):
                 send_command(cmd_sock, "TELEOP:STOP")
                 break
 
-            if keyboard.is_pressed('space'):
+            if is_key('space'):
                 speed = 0.0
                 angle = 0.0
                 send_command(cmd_sock, "TELEOP:STOP")
 
             else:
                 # Accélération / décélération
-                if keyboard.is_pressed('z'):
+                if is_key('z'):
                     if abs(speed) < DEAD_ZONE:
-                        speed = KICK_START  # boost initial
+                        speed = KICK_START
                     else:
                         speed = min(speed + ACCEL_STEP, MAX_FWD_SPEED)
                     throttle_active = True
 
-                if keyboard.is_pressed('s'):
+                if is_key('s'):
                     if abs(speed) < DEAD_ZONE:
                         speed = -KICK_START
                     else:
                         speed = max(speed - ACCEL_STEP, MAX_BWD_SPEED)
                     throttle_active = True
 
-                # Direction (peut être combiné avec Z/S !)
-                if keyboard.is_pressed('q'):
+                if is_key('q'):
                     angle = max(-MAX_ANGLE, angle - ANGLE_STEP)
 
-                if keyboard.is_pressed('d'):
+                if is_key('d'):
                     angle = min(MAX_ANGLE, angle + ANGLE_STEP)
 
-                # Test servo
-                if keyboard.is_pressed('t'):
+                # Test servo (with debounce via key state)
+                if is_key('t') and not getattr(main, '_t_prev', False):
                     test_idx = (test_idx + 1) % len(test_angles)
                     angle = test_angles[test_idx]
                     speed = 0.0
-                    time.sleep(0.3)  # anti-rebond
+                main._t_prev = is_key('t')  # type: ignore
 
-                if keyboard.is_pressed('r'):
+                if is_key('r'):
                     angle = 0.0
                     test_idx = -1
 
-                if keyboard.is_pressed('o'):
+                if is_key('o') and not getattr(main, '_o_prev', False):
                     show_overlay = not show_overlay
-                    time.sleep(0.3)  # anti-rebond
+                main._o_prev = is_key('o')  # type: ignore
 
             # Décélération auto si aucune touche gaz
             if not throttle_active:
@@ -476,18 +427,16 @@ def main() -> int:
                 elif ok:
                     cmd_ok = True
 
-            # ── Display ──
+            # ── Display (all drawing is in-place, no copies) ──
             frame = video.get_frame()
             if frame is not None:
                 if show_overlay:
-                    frame = draw_parking_overlay(frame, angle, car_w_ratio)
-                view = draw_hud(frame, video.fps, speed, angle,
-                                video.connected, cmd_ok, tstate)
-                cv2.imshow(WINDOW_NAME, view)
+                    draw_parking_overlay(frame, angle, car_w_ratio)
+                draw_hud(frame, video.fps, speed, angle,
+                         video.connected, cmd_ok, tstate)
+                cv2.imshow(WINDOW_NAME, frame)
 
-            # cv2.waitKey(1) ONLY for window events, NOT for key capture
-            if cv2.waitKey(1) == -1:
-                pass  # window event processed
+            cv2.waitKey(1)  # pump window events
 
             # Rate limit control loop
             elapsed = time.perf_counter() - tick_start
