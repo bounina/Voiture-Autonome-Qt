@@ -319,7 +319,7 @@ class VideoReceiver(threading.Thread):
 def main() -> int:
     args = parse_args()
 
-    # Video receiver thread (non-bloquant)
+    # Video receiver thread
     video = VideoReceiver(args.pi_ip, args.video_port)
     video.start()
 
@@ -327,39 +327,46 @@ def main() -> int:
     cmd_sock = connect_cmd(args.pi_ip, args.cmd_port)
     cmd_ok = cmd_sock is not None
 
-    # State
-    speed = 0.0
-    angle = 0.0
-    test_angles = [-1.0, -0.5, 0.0, 0.5, 1.0]
-    test_idx = -1
-    show_overlay = args.overlay
-    car_w_ratio = args.car_width_cm / 65.0  # rough cm-to-ratio (65cm ≈ full width)
+    # Shared state (accessed from control thread + display thread)
+    state_lock = threading.Lock()
+    state = {
+        "speed": 0.0,
+        "angle": 0.0,
+        "tstate": "STOP",
+        "cmd_ok": cmd_ok,
+        "show_overlay": args.overlay,
+        "quit": False,
+    }
+    car_w_ratio = args.car_width_cm / 65.0
 
-    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-    print("[TELEOP] Ready. Controls: Z/S/Q/D + simultaneous. ESC=quit.")
+    # ── Control thread (keyboard + commands, 30 Hz) ──
+    def control_loop():
+        nonlocal cmd_sock, cmd_ok
+        speed = 0.0
+        angle = 0.0
+        show_overlay = args.overlay
+        test_angles = [-1.0, -0.5, 0.0, 0.5, 1.0]
+        test_idx = -1
+        t_prev = False
+        o_prev = False
+        last_cmd_time = 0.0
+        CMD_INTERVAL = 0.05
 
-    tick_interval = 1.0 / CONTROL_HZ
-    last_cmd_time = 0.0
-    CMD_INTERVAL = 0.05  # 20 Hz max commands
-
-    try:
-        while True:
+        while not state["quit"]:
             tick_start = time.perf_counter()
-
-            # ── Keyboard (simultaneous via keyboard library) ──
             throttle_active = False
 
             if is_key('esc'):
                 send_command(cmd_sock, "TELEOP:STOP")
+                with state_lock:
+                    state["quit"] = True
                 break
 
             if is_key('space'):
                 speed = 0.0
                 angle = 0.0
                 send_command(cmd_sock, "TELEOP:STOP")
-
             else:
-                # Accélération / décélération
                 if is_key('z'):
                     if abs(speed) < DEAD_ZONE:
                         speed = KICK_START
@@ -376,37 +383,37 @@ def main() -> int:
 
                 if is_key('q'):
                     angle = max(-MAX_ANGLE, angle - ANGLE_STEP)
-
                 if is_key('d'):
                     angle = min(MAX_ANGLE, angle + ANGLE_STEP)
 
-                # Test servo (with debounce via key state)
-                if is_key('t') and not getattr(main, '_t_prev', False):
+                # Test servo (edge detection)
+                t_now = is_key('t')
+                if t_now and not t_prev:
                     test_idx = (test_idx + 1) % len(test_angles)
                     angle = test_angles[test_idx]
                     speed = 0.0
-                main._t_prev = is_key('t')  # type: ignore
+                t_prev = t_now
 
                 if is_key('r'):
                     angle = 0.0
                     test_idx = -1
 
-                if is_key('o') and not getattr(main, '_o_prev', False):
+                o_now = is_key('o')
+                if o_now and not o_prev:
                     show_overlay = not show_overlay
-                main._o_prev = is_key('o')  # type: ignore
+                o_prev = o_now
 
-            # Décélération auto si aucune touche gaz
+            # Auto deceleration
             if not throttle_active:
                 speed *= DECEL_FACTOR
                 if abs(speed) < DEAD_ZONE:
                     speed = 0.0
-                # Rappel direction au centre (léger)
                 if angle > 0.01:
                     angle = max(0.0, angle - ANGLE_RETURN)
                 elif angle < -0.01:
                     angle = min(0.0, angle + ANGLE_RETURN)
 
-            # Throttle state pour HUD
+            # Throttle state
             if abs(speed) < DEAD_ZONE:
                 tstate = "STOP"
             elif speed > 0:
@@ -414,7 +421,14 @@ def main() -> int:
             else:
                 tstate = "BWD"
 
-            # ── Send command ──
+            # Publish state for display thread
+            with state_lock:
+                state["speed"] = speed
+                state["angle"] = angle
+                state["tstate"] = tstate
+                state["show_overlay"] = show_overlay
+
+            # Send command
             now = time.perf_counter()
             if now - last_cmd_time >= CMD_INTERVAL:
                 cmd = f"TELEOP:DRIVE,{speed:.4f},{angle:.4f}"
@@ -426,27 +440,49 @@ def main() -> int:
                     cmd_ok = cmd_sock is not None
                 elif ok:
                     cmd_ok = True
+                with state_lock:
+                    state["cmd_ok"] = cmd_ok
 
-            # ── Display (all drawing is in-place, no copies) ──
+            # 30 Hz rate limit
+            elapsed = time.perf_counter() - tick_start
+            remain = (1.0 / CONTROL_HZ) - elapsed
+            if remain > 0:
+                time.sleep(remain)
+
+    # Start control thread
+    ctrl_thread = threading.Thread(target=control_loop, daemon=True)
+    ctrl_thread.start()
+
+    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+    print("[TELEOP] Ready. Controls: Z/S/Q/D + simultaneous. O=overlay. ESC=quit.")
+
+    # ── Main thread: display only (as fast as frames arrive) ──
+    try:
+        while not state["quit"]:
             frame = video.get_frame()
             if frame is not None:
-                if show_overlay:
-                    draw_parking_overlay(frame, angle, car_w_ratio)
-                draw_hud(frame, video.fps, speed, angle,
-                         video.connected, cmd_ok, tstate)
+                # Read shared state (quick snapshot)
+                with state_lock:
+                    s = state.copy()
+
+                if s["show_overlay"]:
+                    draw_parking_overlay(frame, s["angle"], car_w_ratio)
+                draw_hud(frame, video.fps, s["speed"], s["angle"],
+                         video.connected, s["cmd_ok"], s["tstate"])
                 cv2.imshow(WINDOW_NAME, frame)
 
-            cv2.waitKey(1)  # pump window events
-
-            # Rate limit control loop
-            elapsed = time.perf_counter() - tick_start
-            sleep_time = tick_interval - elapsed
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+            # Pump window events; ~33ms wait = ~30 FPS display
+            if cv2.waitKey(15) & 0xFF == 27:  # ESC via OpenCV too
+                with state_lock:
+                    state["quit"] = True
+                break
 
     except KeyboardInterrupt:
         send_command(cmd_sock, "TELEOP:STOP")
     finally:
+        with state_lock:
+            state["quit"] = True
+        ctrl_thread.join(timeout=2.0)
         video.stop()
         if cmd_sock:
             cmd_sock.close()
