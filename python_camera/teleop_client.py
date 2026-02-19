@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-teleop_client.py — Client de téléopération manuelle (PC Windows).
+teleop_client.py — Client de téléopération RC (PC Windows).
 
-Se connecte à la Raspberry Pi pour :
-  1. Recevoir le flux vidéo JPEG-over-TCP (port 8885)
-  2. Envoyer les commandes clavier vers le serveur C++ (port 8884)
+Utilise la bibliothèque 'keyboard' pour détecter les touches simultanées
+et éviter de bloquer le flux vidéo.
 
-Contrôle style télécommande RC :
-  - Z maintenu  → accélération progressive (rampe)
-  - S maintenu  → accélération arrière progressive
-  - Relâché     → décélération automatique (freinage moteur)
-  - Q/D         → direction progressive gauche/droite
-  - ESPACE      → arrêt d'urgence immédiat
-  - T           → test servo (sweep direction)
-  - ESC         → quitter
+Contrôles :
+  Z = accélérer (rampe progressive, kick-start au démarrage)
+  S = reculer
+  Q = tourner à gauche      D = tourner à droite
+  Z+Q / Z+D = avancer ET tourner en même temps
+  ESPACE = arrêt d'urgence
+  T = test servo (cycle angles)
+  R = recentrer direction
+  ESC = quitter
+
+Dépendances : pip install opencv-python numpy keyboard
 
 Usage :
     python teleop_client.py --pi-ip 192.168.1.42
@@ -25,49 +27,55 @@ import argparse
 import socket
 import struct
 import sys
+import threading
 import time
 
 import cv2
 import numpy as np
 
+try:
+    import keyboard
+except ImportError:
+    print("ERREUR: Installe le module keyboard :")
+    print("  pip install keyboard")
+    sys.exit(1)
+
 WINDOW_NAME = "Teleop - Voiture Autonome"
 
 # ======== PARAMÈTRES DE CONDUITE RC ========
-MAX_FWD_SPEED  = 0.25     # vitesse max avant
-MAX_BWD_SPEED  = -0.15    # vitesse max arrière
-ACCEL_STEP     = 0.018    # accélération par frame (plus réactif)
-DECEL_FACTOR   = 0.92     # décélération auto quand aucune touche
-DEAD_ZONE      = 0.02     # en-dessous, on met à 0
+MAX_FWD_SPEED  = 0.18     # vitesse max avant
+MAX_BWD_SPEED  = -0.12    # vitesse max arrière
+ACCEL_STEP     = 0.012    # accélération par tick normal
+KICK_START     = 0.06     # boost initial pour vaincre l'inertie
+DECEL_FACTOR   = 0.90     # décélération auto (×0.90 par tick)
+DEAD_ZONE      = 0.015    # en-dessous, on met à 0
 
-ANGLE_STEP     = 0.1      # incrément direction par appui Q/D
+ANGLE_STEP     = 0.08     # incrément direction par tick
 MAX_ANGLE      = 1.0
-ANGLE_RETURN   = 0.03     # rappel au centre automatique par frame
+ANGLE_RETURN   = 0.04     # rappel au centre par tick
+
+CONTROL_HZ     = 30       # fréquence de la boucle de contrôle
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="RC-style teleoperation client.")
-    parser.add_argument("--pi-ip", type=str, required=True,
-                        help="IP address of the Raspberry Pi")
-    parser.add_argument("--video-port", type=int, default=8885,
-                        help="Video streaming port (default: 8885)")
-    parser.add_argument("--cmd-port", type=int, default=8884,
-                        help="C++ command server port (default: 8884)")
+    parser.add_argument("--pi-ip", required=True, help="IP of the Raspberry Pi")
+    parser.add_argument("--video-port", type=int, default=8885)
+    parser.add_argument("--cmd-port", type=int, default=8884)
     return parser.parse_args()
 
 
 def recv_exact(sock: socket.socket, size: int) -> bytes:
-    """Receive exactly `size` bytes from socket."""
     buf = b""
     while len(buf) < size:
         chunk = sock.recv(size - len(buf))
         if not chunk:
-            raise ConnectionError("Connection closed by remote")
+            raise ConnectionError("Connection closed")
         buf += chunk
     return buf
 
 
 def connect_video(ip: str, port: int) -> socket.socket:
-    """Connect to the Pi video streamer with retries."""
     while True:
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -77,26 +85,24 @@ def connect_video(ip: str, port: int) -> socket.socket:
             print(f"[VIDEO] Connected to {ip}:{port}")
             return s
         except (ConnectionRefusedError, socket.timeout, OSError) as e:
-            print(f"[VIDEO] Waiting for streamer ({e})... retry in 2s")
-            time.sleep(2.0)
+            print(f"[VIDEO] Waiting ({e})... retry in 2s")
+            time.sleep(2)
 
 
 def connect_cmd(ip: str, port: int) -> socket.socket | None:
-    """Connect to the C++ command server."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(3.0)
         s.connect((ip, port))
         s.setblocking(False)
-        print(f"[CMD] Connected to C++ server {ip}:{port}")
+        print(f"[CMD] Connected to {ip}:{port}")
         return s
     except (ConnectionRefusedError, socket.timeout, OSError) as e:
-        print(f"[CMD] Could not connect to C++ server: {e}")
+        print(f"[CMD] Could not connect: {e}")
         return None
 
 
 def send_command(sock: socket.socket | None, cmd: str) -> bool:
-    """Send a command to the C++ server. Returns False on error."""
     if sock is None:
         return False
     try:
@@ -108,30 +114,28 @@ def send_command(sock: socket.socket | None, cmd: str) -> bool:
 
 def draw_hud(frame: np.ndarray, fps: float, speed: float, angle: float,
              video_ok: bool, cmd_ok: bool, throttle_state: str) -> np.ndarray:
-    """Draw a heads-up display overlay."""
     out = frame.copy()
     h, w = out.shape[:2]
 
-    # Semi-transparent dark bar at top
+    # Dark bar
     overlay = out.copy()
     cv2.rectangle(overlay, (0, 0), (w, 130), (20, 20, 20), -1)
     cv2.addWeighted(overlay, 0.6, out, 0.4, 0, out)
 
-    # Status line
+    # Status
     vid_color = (0, 255, 0) if video_ok else (0, 0, 255)
     cmd_color = (0, 255, 0) if cmd_ok else (0, 0, 255)
     cv2.putText(out, f"FPS: {fps:.0f}", (10, 28),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
     cv2.putText(out, f"VIDEO: {'OK' if video_ok else 'LOST'}", (150, 28),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, vid_color, 2, cv2.LINE_AA)
-    cv2.putText(out, f"CMD: {'OK' if cmd_ok else 'DISCONNECTED'}", (350, 28),
+    cv2.putText(out, f"CMD: {'OK' if cmd_ok else 'DISCONN'}", (370, 28),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, cmd_color, 2, cv2.LINE_AA)
 
-    # Speed bar (vertical, left side)
-    speed_pct = speed / MAX_FWD_SPEED * 100 if MAX_FWD_SPEED != 0 else 0
-    direction = throttle_state
+    # Speed
+    speed_pct = abs(speed) / MAX_FWD_SPEED * 100
     speed_color = (0, 255, 0) if speed > 0 else ((0, 100, 255) if speed < 0 else (200, 200, 200))
-    cv2.putText(out, f"Speed: {abs(speed_pct):.0f}% ({direction})", (10, 62),
+    cv2.putText(out, f"Speed: {speed_pct:.0f}% ({throttle_state})", (10, 62),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.65, speed_color, 2, cv2.LINE_AA)
 
     # Angle
@@ -139,168 +143,203 @@ def draw_hud(frame: np.ndarray, fps: float, speed: float, angle: float,
                 cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
 
     # Steering bar
-    bar_cx = w // 2
-    bar_y = 118
-    bar_half_w = 150
-    cv2.line(out, (bar_cx - bar_half_w, bar_y), (bar_cx + bar_half_w, bar_y),
+    bar_cx, bar_y, bar_hw = w // 2, 118, 150
+    cv2.line(out, (bar_cx - bar_hw, bar_y), (bar_cx + bar_hw, bar_y),
              (100, 100, 100), 3, cv2.LINE_AA)
-    needle_x = int(bar_cx + angle * bar_half_w)
+    needle_x = int(bar_cx + angle * bar_hw)
     cv2.circle(out, (needle_x, bar_y), 8, (0, 200, 255), -1, cv2.LINE_AA)
-    cv2.putText(out, "L", (bar_cx - bar_half_w - 15, bar_y + 5),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
-    cv2.putText(out, "R", (bar_cx + bar_half_w + 5, bar_y + 5),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
 
-    # Controls at bottom
-    cv2.putText(out, "Z:Accel  S:Recule  Q:Gauche  D:Droite  ESPACE:Stop  T:TestServo  ESC:Quit",
-                (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 180), 1, cv2.LINE_AA)
+    # Help
+    cv2.putText(out, "Z:Accel S:Recule Q+D:Direction ESPACE:Stop T:Test R:Centre ESC:Quit",
+                (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (180, 180, 180), 1, cv2.LINE_AA)
 
     return out
+
+
+class VideoReceiver(threading.Thread):
+    """Thread qui reçoit les frames vidéo sans bloquer la boucle principale."""
+
+    def __init__(self, ip: str, port: int):
+        super().__init__(daemon=True)
+        self.ip = ip
+        self.port = port
+        self.frame: np.ndarray | None = None
+        self.lock = threading.Lock()
+        self.running = True
+        self.connected = False
+        self.fps = 0.0
+
+    def run(self):
+        sock = connect_video(self.ip, self.port)
+        self.connected = True
+        prev_t = time.perf_counter()
+
+        while self.running:
+            try:
+                header = recv_exact(sock, 4)
+                frame_size = struct.unpack(">I", header)[0]
+                if frame_size > 5_000_000:
+                    raise ConnectionError("Frame too large")
+                jpeg_data = recv_exact(sock, frame_size)
+
+                decoded = cv2.imdecode(
+                    np.frombuffer(jpeg_data, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if decoded is not None:
+                    with self.lock:
+                        self.frame = decoded
+
+                    now = time.perf_counter()
+                    dt = now - prev_t
+                    prev_t = now
+                    if dt > 0:
+                        self.fps = 0.9 * self.fps + 0.1 / dt
+
+            except (ConnectionError, socket.timeout, OSError):
+                print("[VIDEO] Lost, reconnecting...")
+                self.connected = False
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                sock = connect_video(self.ip, self.port)
+                self.connected = True
+                prev_t = time.perf_counter()
+
+    def get_frame(self) -> np.ndarray | None:
+        with self.lock:
+            return self.frame.copy() if self.frame is not None else None
+
+    def stop(self):
+        self.running = False
 
 
 def main() -> int:
     args = parse_args()
 
-    # --- Connect ---
-    video_sock = connect_video(args.pi_ip, args.video_port)
+    # Video receiver thread (non-bloquant)
+    video = VideoReceiver(args.pi_ip, args.video_port)
+    video.start()
+
+    # Command connection
     cmd_sock = connect_cmd(args.pi_ip, args.cmd_port)
     cmd_ok = cmd_sock is not None
 
-    # --- State ---
+    # State
     speed = 0.0
     angle = 0.0
-    fps = 0.0
-    prev_t = time.perf_counter()
-    last_cmd_time = 0.0
-    CMD_INTERVAL = 0.05  # envoie commandes max 20x/s
-
-    # Test servo : angles de test pour la touche T
-    TEST_ANGLES = [-1.0, -0.5, 0.0, 0.5, 1.0]
-    test_index = -1  # -1 = pas en mode test
+    test_angles = [-1.0, -0.5, 0.0, 0.5, 1.0]
+    test_idx = -1
 
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-    print("[TELEOP] Ready. Z/S=throttle, Q/D=steer, SPACE=stop, T=test servo, R=center, ESC=quit.")
+    print("[TELEOP] Ready. Controls: Z/S/Q/D + simultaneous. ESC=quit.")
+
+    tick_interval = 1.0 / CONTROL_HZ
+    last_cmd_time = 0.0
+    CMD_INTERVAL = 0.05  # 20 Hz max commands
 
     try:
         while True:
-            # --- Receive video frame ---
-            try:
-                header = recv_exact(video_sock, 4)
-                frame_size = struct.unpack(">I", header)[0]
-                if frame_size > 5_000_000:
-                    raise ConnectionError("Frame too large")
-                jpeg_data = recv_exact(video_sock, frame_size)
-            except (ConnectionError, socket.timeout, OSError) as e:
-                print(f"[VIDEO] Lost: {e}. Reconnecting...")
-                video_sock.close()
-                video_sock = connect_video(args.pi_ip, args.video_port)
-                continue
+            tick_start = time.perf_counter()
 
-            frame = cv2.imdecode(np.frombuffer(jpeg_data, dtype=np.uint8), cv2.IMREAD_COLOR)
-            if frame is None:
-                continue
-
-            # FPS
-            now_t = time.perf_counter()
-            dt = now_t - prev_t
-            prev_t = now_t
-            if dt > 0:
-                fps = (0.9 * fps + 0.1 / dt) if fps > 0 else (1.0 / dt)
-
-            # --- Keyboard ---
-            key = cv2.waitKey(1) & 0xFF
+            # ── Keyboard (simultaneous via keyboard library) ──
             throttle_active = False
-            throttle_state = "COAST"
 
-            if key == 27:  # ESC
+            if keyboard.is_pressed('esc'):
                 send_command(cmd_sock, "TELEOP:STOP")
                 break
 
-            elif key == ord("z"):
-                # Accélération avant
-                speed = min(speed + ACCEL_STEP, MAX_FWD_SPEED)
-                throttle_active = True
-                throttle_state = "FWD"
-
-            elif key == ord("s"):
-                # Accélération arrière
-                speed = max(speed - ACCEL_STEP, MAX_BWD_SPEED)
-                throttle_active = True
-                throttle_state = "BWD"
-
-            elif key == ord("q"):
-                angle = max(-MAX_ANGLE, angle - ANGLE_STEP)
-
-            elif key == ord("d"):
-                angle = min(MAX_ANGLE, angle + ANGLE_STEP)
-
-            elif key == ord(" "):
-                # Arrêt d'urgence
+            if keyboard.is_pressed('space'):
                 speed = 0.0
                 angle = 0.0
-                throttle_state = "STOP"
                 send_command(cmd_sock, "TELEOP:STOP")
 
-            elif key == ord("t"):
-                # Test servo : cycle through test angles (non-bloquant)
-                test_index = (test_index + 1) % len(TEST_ANGLES)
-                test_angle = TEST_ANGLES[test_index]
-                angle = test_angle
-                speed = 0.0
-                print(f"[TEST SERVO] angle = {test_angle:+.1f}  (appuie T pour suivant, R pour centre)")
-                throttle_state = "TEST"
+            else:
+                # Accélération / décélération
+                if keyboard.is_pressed('z'):
+                    if abs(speed) < DEAD_ZONE:
+                        speed = KICK_START  # boost initial
+                    else:
+                        speed = min(speed + ACCEL_STEP, MAX_FWD_SPEED)
+                    throttle_active = True
 
-            elif key == ord("r"):
-                # Recentrer la direction sans stopper
-                angle = 0.0
-                test_index = -1
-                print("[TELEOP] Direction recentr\u00e9e")
+                if keyboard.is_pressed('s'):
+                    if abs(speed) < DEAD_ZONE:
+                        speed = -KICK_START
+                    else:
+                        speed = max(speed - ACCEL_STEP, MAX_BWD_SPEED)
+                    throttle_active = True
 
-            # --- Décélération automatique ---
-            if not throttle_active and key != ord(" ") and key != ord("t"):
-                # Décélération progressive quand aucune touche gaz
+                # Direction (peut être combiné avec Z/S !)
+                if keyboard.is_pressed('q'):
+                    angle = max(-MAX_ANGLE, angle - ANGLE_STEP)
+
+                if keyboard.is_pressed('d'):
+                    angle = min(MAX_ANGLE, angle + ANGLE_STEP)
+
+                # Test servo
+                if keyboard.is_pressed('t'):
+                    test_idx = (test_idx + 1) % len(test_angles)
+                    angle = test_angles[test_idx]
+                    speed = 0.0
+                    time.sleep(0.3)  # anti-rebond
+
+                if keyboard.is_pressed('r'):
+                    angle = 0.0
+                    test_idx = -1
+
+            # Décélération auto si aucune touche gaz
+            if not throttle_active:
                 speed *= DECEL_FACTOR
                 if abs(speed) < DEAD_ZONE:
                     speed = 0.0
-
                 # Rappel direction au centre (léger)
-                if abs(angle) > 0.01:
-                    if angle > 0:
-                        angle = max(0.0, angle - ANGLE_RETURN)
-                    else:
-                        angle = min(0.0, angle + ANGLE_RETURN)
+                if angle > 0.01:
+                    angle = max(0.0, angle - ANGLE_RETURN)
+                elif angle < -0.01:
+                    angle = min(0.0, angle + ANGLE_RETURN)
 
-            # Déterminer throttle_state pour l'affichage
-            if throttle_state == "COAST":
-                if speed > DEAD_ZONE:
-                    throttle_state = "FWD"
-                elif speed < -DEAD_ZONE:
-                    throttle_state = "BWD"
-                else:
-                    throttle_state = "STOP"
+            # Throttle state pour HUD
+            if abs(speed) < DEAD_ZONE:
+                tstate = "STOP"
+            elif speed > 0:
+                tstate = "FWD"
+            else:
+                tstate = "BWD"
 
-            # --- Envoi continu des commandes ---
-            if now_t - last_cmd_time >= CMD_INTERVAL:
+            # ── Send command ──
+            now = time.perf_counter()
+            if now - last_cmd_time >= CMD_INTERVAL:
                 cmd = f"TELEOP:DRIVE,{speed:.4f},{angle:.4f}"
                 ok = send_command(cmd_sock, cmd)
-                last_cmd_time = now_t
-
+                last_cmd_time = now
                 if not ok and cmd_ok:
-                    print("[CMD] Connection lost, reconnecting...")
+                    print("[CMD] Reconnecting...")
                     cmd_sock = connect_cmd(args.pi_ip, args.cmd_port)
                     cmd_ok = cmd_sock is not None
                 elif ok:
                     cmd_ok = True
 
-            # --- HUD & display ---
-            view = draw_hud(frame, fps, speed, angle, True, cmd_ok, throttle_state)
-            cv2.imshow(WINDOW_NAME, view)
+            # ── Display ──
+            frame = video.get_frame()
+            if frame is not None:
+                view = draw_hud(frame, video.fps, speed, angle,
+                                video.connected, cmd_ok, tstate)
+                cv2.imshow(WINDOW_NAME, view)
+
+            # cv2.waitKey(1) ONLY for window events, NOT for key capture
+            if cv2.waitKey(1) == -1:
+                pass  # window event processed
+
+            # Rate limit control loop
+            elapsed = time.perf_counter() - tick_start
+            sleep_time = tick_interval - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
     except KeyboardInterrupt:
         send_command(cmd_sock, "TELEOP:STOP")
-        print("\n[TELEOP] Interrupted.")
     finally:
-        video_sock.close()
+        video.stop()
         if cmd_sock:
             cmd_sock.close()
         cv2.destroyAllWindows()
