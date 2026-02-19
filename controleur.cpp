@@ -302,6 +302,50 @@ void Controleur::handleManualCommand(const QString& cmd)
     isRunning  = true;
     modeManuel = true;
 
+    // --- Commande continue : TELEOP:DRIVE,speed,angle ---
+    if (cmd.startsWith("TELEOP:DRIVE,")) {
+        QStringList parts = cmd.mid(13).split(',');  // après "TELEOP:DRIVE,"
+        if (parts.size() == 2) {
+            bool okV, okA;
+            double v = parts[0].toDouble(&okV);
+            double a = parts[1].toDouble(&okA);
+            if (okV && okA) {
+                manualSpeed = std::clamp(v, -1.0, 1.0);
+                manualAngle = std::clamp(a, -1.0, 1.0);
+                emit deplacer(manualSpeed, manualAngle);
+
+                // Log réduit (1 message sur 20 pour ne pas spammer)
+                static int driveLogCounter = 0;
+                if (++driveLogCounter % 20 == 0) {
+                    qDebug() << "[TELEOP] DRIVE -> V:" << manualSpeed << "A:" << manualAngle;
+                }
+                return;
+            }
+        }
+        qDebug() << "[TELEOP] DRIVE format invalide:" << cmd;
+        return;
+    }
+
+    // --- Test servo : sweep de -1 à +1 pour diagnostic ---
+    if (cmd == "TELEOP:TEST_SERVO") {
+        qDebug() << "[TELEOP] === TEST SERVO START ===";
+        manualSpeed = 0.0;  // pas de mouvement pendant le test
+
+        // Sweep de -1.0 à +1.0 par pas de 0.2 avec pause
+        for (double testAngle = -1.0; testAngle <= 1.0; testAngle += 0.2) {
+            manualAngle = testAngle;
+            emit deplacer(0.0, manualAngle);
+            qDebug() << "[TELEOP] TEST angle:" << testAngle;
+            QThread::msleep(500);  // 500ms par position
+        }
+        // Retour au centre
+        manualAngle = 0.0;
+        emit deplacer(0.0, 0.0);
+        qDebug() << "[TELEOP] === TEST SERVO END ===";
+        return;
+    }
+
+    // --- Commandes discrètes (rétrocompatibilité) ---
     if (cmd == "TELEOP:FWD") {
         manualSpeed = MANUAL_FWD_SPEED;
     }
@@ -324,7 +368,5 @@ void Controleur::handleManualCommand(const QString& cmd)
     }
 
     qDebug() << "[TELEOP]" << cmd << "-> V:" << manualSpeed << "A:" << manualAngle;
-
-    // Applique immédiatement la consigne pour réactivité maximale
     emit deplacer(manualSpeed, manualAngle);
 }
