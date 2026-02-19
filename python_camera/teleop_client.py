@@ -403,15 +403,11 @@ def main() -> int:
                     show_overlay = not show_overlay
                 o_prev = o_now
 
-            # Auto deceleration
+            # Auto deceleration (speed only — steering stays where you set it)
             if not throttle_active:
                 speed *= DECEL_FACTOR
                 if abs(speed) < DEAD_ZONE:
                     speed = 0.0
-                if angle > 0.01:
-                    angle = max(0.0, angle - ANGLE_RETURN)
-                elif angle < -0.01:
-                    angle = min(0.0, angle + ANGLE_RETURN)
 
             # Throttle state
             if abs(speed) < DEAD_ZONE:
