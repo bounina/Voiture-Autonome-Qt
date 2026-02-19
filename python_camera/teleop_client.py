@@ -2,43 +2,34 @@
 """
 teleop_client.py — Client de téléopération RC (PC Windows).
 
-Utilise l'API Windows GetAsyncKeyState pour détecter les touches simultanées
-sans bloquer le flux vidéo (zéro hook, zéro thread, zéro latence).
-
 Contrôles :
-  Z = accélérer (rampe progressive, kick-start au démarrage)
-  S = reculer
-  Q = tourner à gauche      D = tourner à droite
-  Z+Q / Z+D = avancer ET tourner en même temps
+  Z = accélérer    S = reculer
+  Q = gauche       D = droite
+  Z+Q / Z+D = avancer ET tourner
   ESPACE = arrêt d'urgence
-  T = test servo (cycle angles)
-  R = recentrer direction
-  O = overlay parking on/off
-  ESC = quitter
+  T = test servo   R = recentrer direction
+  O = overlay on/off    ESC = quitter
 
 Dépendances : pip install opencv-python numpy
-
-Usage :
-    python teleop_client.py --pi-ip 192.168.1.42
+Usage :       python teleop_client.py --pi-ip 192.168.1.42
 """
 
 from __future__ import annotations
 
 import argparse
 import ctypes
+import json
 import socket
 import struct
-import sys
 import threading
 import time
+from pathlib import Path
 
 import cv2
 import numpy as np
 
-# ======== KEYBOARD — Windows GetAsyncKeyState (zero overhead) ========
+# ═══════════════════════ KEYBOARD (Windows GetAsyncKeyState) ═══════════════
 _user32 = ctypes.windll.user32  # type: ignore[attr-defined]
-
-# Virtual-key codes for AZERTY layout
 _VK = {
     'z': 0x5A, 's': 0x53, 'q': 0x51, 'd': 0x44,
     'space': 0x20, 'esc': 0x1B,
@@ -46,113 +37,85 @@ _VK = {
 }
 
 def is_key(name: str) -> bool:
-    """Check if a key is currently held down (direct Windows API, non-blocking)."""
     vk = _VK.get(name)
     if vk is None:
         return False
     return bool(_user32.GetAsyncKeyState(vk) & 0x8000)
 
-WINDOW_NAME = "Teleop - Voiture Autonome"
+# ═══════════════════════ CONSTANTS ════════════════════════════════════════
+WINDOW_NAME    = "Teleop - Voiture Autonome"
 
-# ======== PARAMÈTRES DE CONDUITE RC ========
-MAX_FWD_SPEED  = 0.18     # vitesse max avant
-MAX_BWD_SPEED  = -0.12    # vitesse max arrière
-ACCEL_STEP     = 0.012    # accélération par tick normal
-KICK_START     = 0.06     # boost initial pour vaincre l'inertie
-DECEL_FACTOR   = 0.90     # décélération auto (×0.90 par tick)
-DEAD_ZONE      = 0.015    # en-dessous, on met à 0
+MAX_FWD_SPEED  = 0.18
+MAX_BWD_SPEED  = -0.12
+ACCEL_STEP     = 0.012
+KICK_START     = 0.06
+DECEL_FACTOR   = 0.90
+DEAD_ZONE      = 0.015
 
-ANGLE_STEP     = 0.08     # incrément direction par tick
+ANGLE_STEP     = 0.08
 MAX_ANGLE      = 1.0
-ANGLE_RETURN   = 0.04     # rappel au centre par tick
 
-CONTROL_HZ     = 30       # fréquence de la boucle de contrôle
+CONTROL_HZ     = 30
 
-# ======== OVERLAY PARKING — CALIBRÉ (scotch bleu 20cm/40cm/60cm) ========
-# Calibration basée sur mesures réelles :
-#   20cm de la caméra → y ≈ 82% de l'image = 0.82
-#   40cm de la caméra → y ≈ 65% de l'image = 0.65
-#   60cm de la caméra → y ≈ 52% de l'image = 0.52
-# Largeur scotch (20cm) à 20cm distance → ~25% de la largeur frame
-CALIB = {
-    # (distance_cm, y_fraction_from_top, px_per_cm_at_this_distance)
-    "points": [
-        (20, 0.82, 8.0),   # 20cm → y=82%, ~160px pour 20cm = 8px/cm
-        (40, 0.65, 5.5),   # 40cm → y=65%, ~110px pour 20cm = 5.5px/cm
-        (60, 0.52, 4.0),   # 60cm → y=52%, ~80px pour 20cm = 4px/cm
-    ],
-}
+# ═══════════════════════ CALIBRATION (from parking_calib.json) ════════════
+CALIB_FILE = Path(__file__).parent / "parking_calib.json"
 
-# Premium color palette (BMW/Mercedes style)
-OEM_COLORS = {
-    "danger":     (48, 50, 220),    # rouge doux
-    "caution":    (55, 190, 235),   # ambre chaud
-    "safe":       (80, 190, 60),    # vert doux
-    "guide":      (230, 230, 230),  # blanc cassé
-    "trajectory": (60, 180, 255),   # orange doré
-    "center":     (200, 220, 255),  # jaune pâle
-    "label_bg":   (30, 30, 30),     # fond label
-    "label_txt":  (220, 220, 220),  # texte label
-    "bumper":     (100, 100, 100),  # indicateur pare-choc
-}
-
+def _load_calib() -> list | None:
+    if not CALIB_FILE.exists():
+        return None
+    try:
+        with open(CALIB_FILE) as f:
+            data = json.load(f)
+        pts = data.get("points", [])
+        return sorted(pts, key=lambda p: p["dist_cm"]) if len(pts) >= 2 else None
+    except (json.JSONDecodeError, KeyError):
+        return None
 
 def _lerp(a: float, b: float, t: float) -> float:
-    """Linear interpolation."""
     return a + (b - a) * t
 
-
-def _y_for_dist(h: int, dist_cm: float) -> int:
-    """Interpolate Y pixel for a real distance using calibration points."""
-    pts = CALIB["points"]
-    # Clamp to calibration range
-    if dist_cm <= pts[0][0]:
-        return int(h * pts[0][1])
-    if dist_cm >= pts[-1][0]:
-        return int(h * pts[-1][1])
-    # Interpolate between calibration points
+def _interp_y(h: int, pts: list, dist_cm: float) -> int:
+    if dist_cm <= pts[0]["dist_cm"]:
+        return int(h * pts[0]["y_frac"])
+    if dist_cm >= pts[-1]["dist_cm"]:
+        return int(h * pts[-1]["y_frac"])
     for i in range(len(pts) - 1):
-        d0, y0, _ = pts[i]
-        d1, y1, _ = pts[i + 1]
+        d0, d1 = pts[i]["dist_cm"], pts[i + 1]["dist_cm"]
         if d0 <= dist_cm <= d1:
             t = (dist_cm - d0) / (d1 - d0)
-            return int(h * _lerp(y0, y1, t))
-    return int(h * pts[-1][1])
+            return int(h * _lerp(pts[i]["y_frac"], pts[i + 1]["y_frac"], t))
+    return int(h * pts[-1]["y_frac"])
 
+def _interp_ppcm(pts: list, dist_cm: float) -> float:
+    if dist_cm <= pts[0]["dist_cm"]:
+        return pts[0]["px_per_cm"]
+    if dist_cm >= pts[-1]["dist_cm"]:
+        return pts[-1]["px_per_cm"]
+    for i in range(len(pts) - 1):
+        d0, d1 = pts[i]["dist_cm"], pts[i + 1]["dist_cm"]
+        if d0 <= dist_cm <= d1:
+            t = (dist_cm - d0) / (d1 - d0)
+            return _lerp(pts[i]["px_per_cm"], pts[i + 1]["px_per_cm"], t)
+    return pts[-1]["px_per_cm"]
 
-def _half_width_at_dist(w: int, dist_cm: float, car_half_cm: float) -> int:
-    """Compute half-width in pixels at a given distance using calibration."""
-    pts = CALIB["points"]
-    # Interpolate px/cm ratio
-    if dist_cm <= pts[0][0]:
-        ppcm = pts[0][2]
-    elif dist_cm >= pts[-1][0]:
-        ppcm = pts[-1][2]
-    else:
-        for i in range(len(pts) - 1):
-            d0, _, p0 = pts[i]
-            d1, _, p1 = pts[i + 1]
-            if d0 <= dist_cm <= d1:
-                t = (dist_cm - d0) / (d1 - d0)
-                ppcm = _lerp(p0, p1, t)
-                break
-        else:
-            ppcm = pts[-1][2]
-    return int(car_half_cm * ppcm)
+# Overlay colors (BGR)
+_RED    = (60, 55, 220)
+_YELLOW = (50, 200, 240)
+_GREEN  = (75, 195, 55)
+_WHITE  = (240, 240, 240)
+_ORANGE = (50, 160, 255)
 
-
+# ═══════════════════════ NETWORK ══════════════════════════════════════════
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="RC-style teleoperation client.")
-    parser.add_argument("--pi-ip", required=True, help="IP of the Raspberry Pi")
-    parser.add_argument("--video-port", type=int, default=8885)
-    parser.add_argument("--cmd-port", type=int, default=8884)
-    parser.add_argument("--car-width-cm", type=float, default=20.0,
-                        help="Largeur du véhicule en cm (default: 20)")
-    parser.add_argument("--overlay", action="store_true", default=True,
-                        help="Afficher l'overlay parking au démarrage")
-    return parser.parse_args()
-
+    p = argparse.ArgumentParser(description="RC teleoperation client.")
+    p.add_argument("--pi-ip", required=True)
+    p.add_argument("--video-port", type=int, default=8885)
+    p.add_argument("--cmd-port", type=int, default=8884)
+    p.add_argument("--car-width-cm", type=float, default=20.0,
+                   help="Largeur du véhicule en cm")
+    p.add_argument("--overlay", action="store_true", default=True)
+    return p.parse_args()
 
 def recv_exact(sock: socket.socket, size: int) -> bytes:
     buf = b""
@@ -162,7 +125,6 @@ def recv_exact(sock: socket.socket, size: int) -> bytes:
             raise ConnectionError("Connection closed")
         buf += chunk
     return buf
-
 
 def connect_video(ip: str, port: int) -> socket.socket:
     while True:
@@ -177,7 +139,6 @@ def connect_video(ip: str, port: int) -> socket.socket:
             print(f"[VIDEO] Waiting ({e})... retry in 2s")
             time.sleep(2)
 
-
 def connect_cmd(ip: str, port: int) -> socket.socket | None:
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -190,7 +151,6 @@ def connect_cmd(ip: str, port: int) -> socket.socket | None:
         print(f"[CMD] Could not connect: {e}")
         return None
 
-
 def send_command(sock: socket.socket | None, cmd: str) -> bool:
     if sock is None:
         return False
@@ -200,17 +160,16 @@ def send_command(sock: socket.socket | None, cmd: str) -> bool:
     except (BrokenPipeError, ConnectionResetError, BlockingIOError, OSError):
         return False
 
+# ═══════════════════════ DRAWING ══════════════════════════════════════════
 
 def draw_hud(frame: np.ndarray, fps: float, speed: float, angle: float,
              video_ok: bool, cmd_ok: bool, throttle_state: str) -> None:
-    """Draw HUD in-place (no copy)."""
     h, w = frame.shape[:2]
 
-    # Dark bar
+    # Dark bar at top
     sub = frame[0:130, 0:w]
     sub[:] = (sub * 0.4 + np.array([20, 20, 20]) * 0.6).astype(np.uint8)
 
-    # Status
     vid_color = (0, 255, 0) if video_ok else (0, 0, 255)
     cmd_color = (0, 255, 0) if cmd_ok else (0, 0, 255)
     cv2.putText(frame, f"FPS: {fps:.0f}", (10, 28),
@@ -220,13 +179,10 @@ def draw_hud(frame: np.ndarray, fps: float, speed: float, angle: float,
     cv2.putText(frame, f"CMD: {'OK' if cmd_ok else 'DISCONN'}", (370, 28),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, cmd_color, 2, cv2.LINE_AA)
 
-    # Speed
     speed_pct = abs(speed) / MAX_FWD_SPEED * 100
-    speed_color = (0, 255, 0) if speed > 0 else ((0, 100, 255) if speed < 0 else (200, 200, 200))
+    sc = (0, 255, 0) if speed > 0 else ((0, 100, 255) if speed < 0 else (200, 200, 200))
     cv2.putText(frame, f"Speed: {speed_pct:.0f}% ({throttle_state})", (10, 62),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.65, speed_color, 2, cv2.LINE_AA)
-
-    # Angle
+                cv2.FONT_HERSHEY_SIMPLEX, 0.65, sc, 2, cv2.LINE_AA)
     cv2.putText(frame, f"Angle: {angle:+.2f}", (10, 92),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
 
@@ -237,131 +193,77 @@ def draw_hud(frame: np.ndarray, fps: float, speed: float, angle: float,
     needle_x = int(bar_cx + angle * bar_hw)
     cv2.circle(frame, (needle_x, bar_y), 8, (0, 200, 255), -1, cv2.LINE_AA)
 
-    # Help
-    cv2.putText(frame, "Z:Accel S:Recule Q+D:Direction ESPACE:Stop O:Overlay ESC:Quit",
-                (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (180, 180, 180), 1, cv2.LINE_AA)
+    cv2.putText(frame, "Z:Accel S:Recule Q+D:Direction ESPACE:Stop T:Test R:Centre O:Overlay ESC:Quit",
+                (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (180, 180, 180), 1, cv2.LINE_AA)
 
 
 def draw_parking_overlay(frame: np.ndarray, steering: float,
-                         car_width_ratio: float = 0.30) -> None:
-    """Draw premium OEM-style parking overlay, calibrated to real distances."""
+                         car_half_cm: float, calib: list | None) -> None:
+    """Overlay minimaliste style Toyota/Honda."""
     h, w = frame.shape[:2]
     cx = w // 2
-    car_half_cm = (car_width_ratio * 65.0) / 2  # convert ratio back to cm
 
-    # ── Distance markers (calibrated, every 20cm) ──
-    markers = [
-        (20, "20 cm", OEM_COLORS["danger"]),
-        (40, "40 cm", OEM_COLORS["caution"]),
-        (60, "60 cm", OEM_COLORS["safe"]),
+    if calib is None or len(calib) < 2:
+        cv2.putText(frame, "PAS DE CALIBRATION - python calibrate_parking.py --pi-ip ...",
+                    (10, h - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                    (0, 0, 255), 1, cv2.LINE_AA)
+        return
+
+    d_min = calib[0]["dist_cm"]
+    d_max = calib[-1]["dist_cm"]
+
+    # Config : 3 lignes de distance (rouge/jaune/vert)
+    lines_cfg = [
+        (d_min,                _RED,    2),
+        ((d_min + d_max) / 2,  _YELLOW, 2),
+        (d_max,                _GREEN,  2),
     ]
 
-    # ── Zone shading (gradient between markers) ──
-    # Danger zone: bottom to 20cm
-    y_bottom = h
-    y_20 = _y_for_dist(h, 20)
-    y_40 = _y_for_dist(h, 40)
-    y_60 = _y_for_dist(h, 60)
-
-    # Semi-transparent zone fills
-    for y_top, y_bot, color, alpha in [
-        (y_20, y_bottom, OEM_COLORS["danger"], 0.12),
-        (y_40, y_20,     OEM_COLORS["caution"], 0.10),
-        (y_60, y_40,     OEM_COLORS["safe"],    0.08),
-    ]:
-        if y_bot > y_top > 0:
-            hw_top = _half_width_at_dist(w, (y_bottom - y_top) / (y_bottom - y_60) * 60, car_half_cm)
-            hw_bot = _half_width_at_dist(w, (y_bottom - y_bot) / max(1, y_bottom - y_60) * 60, car_half_cm)
-            # Simple rectangular ROI blend (fast)
-            hw_max = max(hw_top, hw_bot) + 10
-            x1 = max(0, cx - hw_max)
-            x2 = min(w, cx + hw_max)
-            roi = frame[y_top:y_bot, x1:x2]
-            if roi.size > 0:
-                tint = np.full_like(roi, color)
-                cv2.addWeighted(roi, 1.0 - alpha, tint, alpha, 0, roi)
-
-    # ── Static guide lines (vehicle width, perspective-correct) ──
-    n_pts = 35
-    left_pts = np.empty((n_pts, 2), dtype=np.int32)
-    right_pts = np.empty((n_pts, 2), dtype=np.int32)
-    for i in range(n_pts):
-        t = i / (n_pts - 1)
-        dist_cm = 10 + t * 55  # 10cm to 65cm range
-        y = _y_for_dist(h, dist_cm)
-        hw = _half_width_at_dist(w, dist_cm, car_half_cm)
-        left_pts[i] = (cx - hw, y)
+    # ── Guide lines (largeur véhicule, convergentes) ──
+    n = 30
+    left_pts  = np.empty((n, 2), dtype=np.int32)
+    right_pts = np.empty((n, 2), dtype=np.int32)
+    for i in range(n):
+        t = i / (n - 1)
+        d = d_min + t * (d_max - d_min)
+        y = _interp_y(h, calib, d)
+        hw = int(car_half_cm * _interp_ppcm(calib, d))
+        left_pts[i]  = (cx - hw, y)
         right_pts[i] = (cx + hw, y)
 
-    # Guide line glow effect (thick dim line + thin bright line)
-    cv2.polylines(frame, [left_pts], False, (80, 80, 80), 4, cv2.LINE_AA)
-    cv2.polylines(frame, [right_pts], False, (80, 80, 80), 4, cv2.LINE_AA)
-    cv2.polylines(frame, [left_pts], False, OEM_COLORS["guide"], 2, cv2.LINE_AA)
-    cv2.polylines(frame, [right_pts], False, OEM_COLORS["guide"], 2, cv2.LINE_AA)
+    cv2.polylines(frame, [left_pts],  False, _WHITE, 2, cv2.LINE_AA)
+    cv2.polylines(frame, [right_pts], False, _WHITE, 2, cv2.LINE_AA)
 
-    # ── Distance marker lines + labels ──
-    for dist_cm, label, color in markers:
-        y = _y_for_dist(h, dist_cm)
-        hw = _half_width_at_dist(w, dist_cm, car_half_cm)
+    # ── Lignes de distance horizontales ──
+    for dist, color, thick in lines_cfg:
+        y = _interp_y(h, calib, dist)
+        hw = int(car_half_cm * _interp_ppcm(calib, dist))
         xl, xr = cx - hw, cx + hw
+        cv2.line(frame, (xl, y), (xr, y), color, thick, cv2.LINE_AA)
+        cv2.putText(frame, f"{int(dist)}cm", (xr + 6, y + 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, color, 1, cv2.LINE_AA)
 
-        # Marker line with glow
-        cv2.line(frame, (xl, y), (xr, y), (40, 40, 40), 3, cv2.LINE_AA)
-        cv2.line(frame, (xl, y), (xr, y), color, 2, cv2.LINE_AA)
-
-        # Small ticks at ends
-        cv2.line(frame, (xl, y - 5), (xl, y + 5), color, 2, cv2.LINE_AA)
-        cv2.line(frame, (xr, y - 5), (xr, y + 5), color, 2, cv2.LINE_AA)
-
-        # Pill-shaped label background
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
-        lx = xr + 8
-        ly = y
-        # Rounded rectangle background
-        pad = 4
-        cv2.rectangle(frame, (lx - pad, ly - th - pad), (lx + tw + pad, ly + pad + 2),
-                      OEM_COLORS["label_bg"], -1, cv2.LINE_AA)
-        cv2.rectangle(frame, (lx - pad, ly - th - pad), (lx + tw + pad, ly + pad + 2),
-                      color, 1, cv2.LINE_AA)
-        cv2.putText(frame, label, (lx, ly),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, OEM_COLORS["label_txt"], 1, cv2.LINE_AA)
-
-    # ── Bumper indicator (bottom center) ──
-    bumper_y = h - 8
-    bumper_hw = _half_width_at_dist(w, 5, car_half_cm)
-    cv2.line(frame, (cx - bumper_hw, bumper_y), (cx + bumper_hw, bumper_y),
-             OEM_COLORS["bumper"], 4, cv2.LINE_AA)
-    cv2.line(frame, (cx - bumper_hw, bumper_y), (cx + bumper_hw, bumper_y),
-             OEM_COLORS["guide"], 2, cv2.LINE_AA)
-
-    # ── Dynamic trajectory curves (follow steering) ──
+    # ── Courbes de trajectoire dynamiques ──
     steer = max(-1.0, min(1.0, steering))
-    if abs(steer) > 0.02:
-        tl = np.empty((n_pts, 2), dtype=np.int32)
-        tr = np.empty((n_pts, 2), dtype=np.int32)
-        tc = np.empty((n_pts, 2), dtype=np.int32)
-        for i in range(n_pts):
-            t = i / (n_pts - 1)
-            dist_cm = 10 + t * 55
-            y = _y_for_dist(h, dist_cm)
-            hw = _half_width_at_dist(w, dist_cm, car_half_cm)
-            # Quadratic lateral shift (more curvature at distance)
-            x_off = int(steer * (t ** 2) * w * 0.22)
+    if abs(steer) > 0.03:
+        tl = np.empty((n, 2), dtype=np.int32)
+        tr = np.empty((n, 2), dtype=np.int32)
+        for i in range(n):
+            t = i / (n - 1)
+            d = d_min + t * (d_max - d_min)
+            y = _interp_y(h, calib, d)
+            hw = int(car_half_cm * _interp_ppcm(calib, d))
+            x_off = int(steer * (t ** 2) * w * 0.20)
             tl[i] = (cx - hw + x_off, y)
             tr[i] = (cx + hw + x_off, y)
-            tc[i] = (cx + x_off, y)
+        cv2.polylines(frame, [tl], False, _ORANGE, 2, cv2.LINE_AA)
+        cv2.polylines(frame, [tr], False, _ORANGE, 2, cv2.LINE_AA)
 
-        # Trajectory glow
-        cv2.polylines(frame, [tl], False, (30, 80, 120), 4, cv2.LINE_AA)
-        cv2.polylines(frame, [tr], False, (30, 80, 120), 4, cv2.LINE_AA)
-        cv2.polylines(frame, [tl], False, OEM_COLORS["trajectory"], 2, cv2.LINE_AA)
-        cv2.polylines(frame, [tr], False, OEM_COLORS["trajectory"], 2, cv2.LINE_AA)
-        # Center trajectory (dashed effect via thin line)
-        cv2.polylines(frame, [tc], False, OEM_COLORS["center"], 1, cv2.LINE_AA)
 
+# ═══════════════════════ VIDEO RECEIVER ═══════════════════════════════════
 
 class VideoReceiver(threading.Thread):
-    """Thread qui reçoit les frames vidéo sans bloquer la boucle principale."""
+    """Thread receiving video frames from Pi."""
 
     def __init__(self, ip: str, port: int):
         super().__init__(daemon=True)
@@ -392,11 +294,10 @@ class VideoReceiver(threading.Thread):
                     with self.lock:
                         self.frame = decoded
 
-                    now = time.perf_counter()
-                    dt = now - prev_t
-                    prev_t = now
-                    if dt > 0:
-                        self.fps = 0.9 * self.fps + 0.1 / dt
+                now = time.perf_counter()
+                dt = now - prev_t
+                self.fps = 1.0 / dt if dt > 0 else 0.0
+                prev_t = now
 
             except (ConnectionError, socket.timeout, OSError):
                 print("[VIDEO] Lost, reconnecting...")
@@ -417,41 +318,42 @@ class VideoReceiver(threading.Thread):
         self.running = False
 
 
+# ═══════════════════════ MAIN ═════════════════════════════════════════════
+
 def main() -> int:
     args = parse_args()
 
-    # Video receiver thread
     video = VideoReceiver(args.pi_ip, args.video_port)
     video.start()
 
-    # Command connection
     cmd_sock = connect_cmd(args.pi_ip, args.cmd_port)
     cmd_ok = cmd_sock is not None
 
-    # Shared state (accessed from control thread + display thread)
+    # Load calibration from JSON
+    calib = _load_calib()
+    if calib:
+        print(f"[CALIB] Loaded {len(calib)} points from {CALIB_FILE}")
+    else:
+        print("[CALIB] No calibration file — overlay will show warning")
+
+    car_half_cm = args.car_width_cm / 2.0
+
+    # Shared state
     state_lock = threading.Lock()
     state = {
-        "speed": 0.0,
-        "angle": 0.0,
-        "tstate": "STOP",
-        "cmd_ok": cmd_ok,
-        "show_overlay": args.overlay,
-        "quit": False,
+        "speed": 0.0, "angle": 0.0, "tstate": "STOP",
+        "cmd_ok": cmd_ok, "show_overlay": args.overlay, "quit": False,
     }
-    car_w_ratio = args.car_width_cm / 65.0
 
-    # ── Control thread (keyboard + commands, 30 Hz) ──
+    # ── Control thread ──
     def control_loop():
         nonlocal cmd_sock, cmd_ok
-        speed = 0.0
-        angle = 0.0
+        speed = angle = 0.0
         show_overlay = args.overlay
         test_angles = [-1.0, -0.5, 0.0, 0.5, 1.0]
         test_idx = -1
-        t_prev = False
-        o_prev = False
+        t_prev = o_prev = False
         last_cmd_time = 0.0
-        CMD_INTERVAL = 0.05
 
         while not state["quit"]:
             tick_start = time.perf_counter()
@@ -464,75 +366,50 @@ def main() -> int:
                 break
 
             if is_key('space'):
-                speed = 0.0
-                angle = 0.0
+                speed = angle = 0.0
                 send_command(cmd_sock, "TELEOP:STOP")
             else:
                 if is_key('z'):
-                    if abs(speed) < DEAD_ZONE:
-                        speed = KICK_START
-                    else:
-                        speed = min(speed + ACCEL_STEP, MAX_FWD_SPEED)
+                    speed = KICK_START if abs(speed) < DEAD_ZONE else min(speed + ACCEL_STEP, MAX_FWD_SPEED)
                     throttle_active = True
-
                 if is_key('s'):
-                    if abs(speed) < DEAD_ZONE:
-                        speed = -KICK_START
-                    else:
-                        speed = max(speed - ACCEL_STEP, MAX_BWD_SPEED)
+                    speed = -KICK_START if abs(speed) < DEAD_ZONE else max(speed - ACCEL_STEP, MAX_BWD_SPEED)
                     throttle_active = True
-
                 if is_key('q'):
                     angle = max(-MAX_ANGLE, angle - ANGLE_STEP)
                 if is_key('d'):
                     angle = min(MAX_ANGLE, angle + ANGLE_STEP)
 
-                # Test servo (edge detection)
                 t_now = is_key('t')
                 if t_now and not t_prev:
                     test_idx = (test_idx + 1) % len(test_angles)
-                    angle = test_angles[test_idx]
-                    speed = 0.0
+                    angle, speed = test_angles[test_idx], 0.0
                 t_prev = t_now
 
                 if is_key('r'):
-                    angle = 0.0
-                    test_idx = -1
+                    angle, test_idx = 0.0, -1
 
                 o_now = is_key('o')
                 if o_now and not o_prev:
                     show_overlay = not show_overlay
                 o_prev = o_now
 
-            # Auto deceleration (speed only — steering stays where you set it)
             if not throttle_active:
                 speed *= DECEL_FACTOR
                 if abs(speed) < DEAD_ZONE:
                     speed = 0.0
 
-            # Throttle state
-            if abs(speed) < DEAD_ZONE:
-                tstate = "STOP"
-            elif speed > 0:
-                tstate = "FWD"
-            else:
-                tstate = "BWD"
+            tstate = "STOP" if abs(speed) < DEAD_ZONE else ("FWD" if speed > 0 else "BWD")
 
-            # Publish state for display thread
             with state_lock:
-                state["speed"] = speed
-                state["angle"] = angle
-                state["tstate"] = tstate
-                state["show_overlay"] = show_overlay
+                state.update(speed=speed, angle=angle, tstate=tstate,
+                             show_overlay=show_overlay)
 
-            # Send command
             now = time.perf_counter()
-            if now - last_cmd_time >= CMD_INTERVAL:
-                cmd = f"TELEOP:DRIVE,{speed:.4f},{angle:.4f}"
-                ok = send_command(cmd_sock, cmd)
+            if now - last_cmd_time >= 0.05:
+                ok = send_command(cmd_sock, f"TELEOP:DRIVE,{speed:.4f},{angle:.4f}")
                 last_cmd_time = now
                 if not ok and cmd_ok:
-                    print("[CMD] Reconnecting...")
                     cmd_sock = connect_cmd(args.pi_ip, args.cmd_port)
                     cmd_ok = cmd_sock is not None
                 elif ok:
@@ -540,46 +417,40 @@ def main() -> int:
                 with state_lock:
                     state["cmd_ok"] = cmd_ok
 
-            # 30 Hz rate limit
-            elapsed = time.perf_counter() - tick_start
-            remain = (1.0 / CONTROL_HZ) - elapsed
+            remain = (1.0 / CONTROL_HZ) - (time.perf_counter() - tick_start)
             if remain > 0:
                 time.sleep(remain)
 
-    # Start control thread
-    ctrl_thread = threading.Thread(target=control_loop, daemon=True)
-    ctrl_thread.start()
+    ctrl = threading.Thread(target=control_loop, daemon=True)
+    ctrl.start()
 
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-    print("[TELEOP] Ready. Controls: Z/S/Q/D + simultaneous. O=overlay. ESC=quit.")
+    print("[TELEOP] Ready. Z/S/Q/D O=overlay ESC=quit")
 
-    # ── Main thread: display only (as fast as frames arrive) ──
+    # ── Display loop (main thread) ──
     try:
         while not state["quit"]:
             frame = video.get_frame()
             if frame is not None:
-                # Read shared state (quick snapshot)
                 with state_lock:
                     s = state.copy()
-
                 if s["show_overlay"]:
-                    draw_parking_overlay(frame, s["angle"], car_w_ratio)
-                draw_hud(frame, video.fps, s["speed"], s["angle"],
-                         video.connected, s["cmd_ok"], s["tstate"])
+                    draw_parking_overlay(frame, float(s["angle"]),
+                                         car_half_cm, calib)
+                draw_hud(frame, video.fps, float(s["speed"]), float(s["angle"]),
+                         video.connected, bool(s["cmd_ok"]), str(s["tstate"]))
                 cv2.imshow(WINDOW_NAME, frame)
 
-            # Pump window events; ~33ms wait = ~30 FPS display
-            if cv2.waitKey(15) & 0xFF == 27:  # ESC via OpenCV too
+            if cv2.waitKey(15) & 0xFF == 27:
                 with state_lock:
                     state["quit"] = True
                 break
-
     except KeyboardInterrupt:
         send_command(cmd_sock, "TELEOP:STOP")
     finally:
         with state_lock:
             state["quit"] = True
-        ctrl_thread.join(timeout=2.0)
+        ctrl.join(timeout=2.0)
         video.stop()
         if cmd_sock:
             cmd_sock.close()
