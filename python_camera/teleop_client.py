@@ -56,12 +56,27 @@ ANGLE_RETURN   = 0.04     # rappel au centre par tick
 
 CONTROL_HZ     = 30       # fréquence de la boucle de contrôle
 
+# ======== OVERLAY PARKING ========
+# Distances en pixels (proportionnelles à la hauteur de l'image)
+# Zone verte = loin, jaune = moyen, rouge = proche
+OVERLAY_COLORS = {
+    "green":  (0, 200, 80),
+    "yellow": (0, 220, 255),
+    "red":    (0, 50, 255),
+    "guide":  (255, 255, 255),
+    "marker": (200, 200, 200),
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="RC-style teleoperation client.")
     parser.add_argument("--pi-ip", required=True, help="IP of the Raspberry Pi")
     parser.add_argument("--video-port", type=int, default=8885)
     parser.add_argument("--cmd-port", type=int, default=8884)
+    parser.add_argument("--car-width-cm", type=float, default=20.0,
+                        help="Largeur du véhicule en cm (default: 20)")
+    parser.add_argument("--overlay", action="store_true", default=True,
+                        help="Afficher l'overlay parking au démarrage")
     return parser.parse_args()
 
 
@@ -150,8 +165,144 @@ def draw_hud(frame: np.ndarray, fps: float, speed: float, angle: float,
     cv2.circle(out, (needle_x, bar_y), 8, (0, 200, 255), -1, cv2.LINE_AA)
 
     # Help
-    cv2.putText(out, "Z:Accel S:Recule Q+D:Direction ESPACE:Stop T:Test R:Centre ESC:Quit",
-                (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (180, 180, 180), 1, cv2.LINE_AA)
+    overlay_txt = "O:Overlay" if True else ""
+    cv2.putText(out, f"Z:Accel S:Recule Q+D:Direction ESPACE:Stop T:Test R:Centre {overlay_txt} ESC:Quit",
+                (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (180, 180, 180), 1, cv2.LINE_AA)
+
+    return out
+
+
+def draw_parking_overlay(frame: np.ndarray, steering: float,
+                         car_width_ratio: float = 0.30) -> np.ndarray:
+    """Draw OEM-style parking overlay with distance zones and dynamic curves.
+
+    Args:
+        frame: BGR frame
+        steering: normalized steering angle [-1.0, +1.0]
+        car_width_ratio: car width as fraction of frame width (~0.30)
+    """
+    out = frame.copy()
+    h, w = out.shape[:2]
+    cx = w // 2
+
+    # ── Zone proportions (from bottom of frame) ──
+    # Red zone:   bottom 20% of frame
+    # Yellow zone: next 15%
+    # Green zone:  next 15%
+    zone_bottom = h          # bottom of frame
+    red_top     = int(h * 0.80)
+    yellow_top  = int(h * 0.65)
+    green_top   = int(h * 0.50)
+
+    # Car width in pixels
+    half_car = int(w * car_width_ratio / 2)
+
+    # ── Draw colored zones (semi-transparent) ──
+    overlay_layer = out.copy()
+
+    # Red zone
+    pts_red = np.array([
+        [cx - half_car, zone_bottom],
+        [cx + half_car, zone_bottom],
+        [cx + half_car, red_top],
+        [cx - half_car, red_top],
+    ], np.int32)
+    cv2.fillPoly(overlay_layer, [pts_red], OVERLAY_COLORS["red"])
+
+    # Yellow zone (slightly wider at top due to perspective)
+    spread_y = int(half_car * 1.05)
+    pts_yellow = np.array([
+        [cx - half_car, red_top],
+        [cx + half_car, red_top],
+        [cx + spread_y, yellow_top],
+        [cx - spread_y, yellow_top],
+    ], np.int32)
+    cv2.fillPoly(overlay_layer, [pts_yellow], OVERLAY_COLORS["yellow"])
+
+    # Green zone (wider still)
+    spread_g = int(half_car * 1.12)
+    pts_green = np.array([
+        [cx - spread_y, yellow_top],
+        [cx + spread_y, yellow_top],
+        [cx + spread_g, green_top],
+        [cx - spread_g, green_top],
+    ], np.int32)
+    cv2.fillPoly(overlay_layer, [pts_green], OVERLAY_COLORS["green"])
+
+    # Blend zones
+    cv2.addWeighted(overlay_layer, 0.18, out, 0.82, 0, out)
+
+    # ── Guide lines (vehicle width, fixed) ──
+    # Left guide
+    left_pts = []
+    right_pts = []
+    n_samples = 60
+    for i in range(n_samples):
+        t = i / (n_samples - 1)  # 0 = bottom, 1 = top
+        y = int(zone_bottom - t * (zone_bottom - green_top))
+        # Slight perspective convergence
+        spread = half_car * (1.0 + t * 0.15)
+        left_pts.append((int(cx - spread), y))
+        right_pts.append((int(cx + spread), y))
+
+    left_arr = np.array(left_pts, dtype=np.int32)
+    right_arr = np.array(right_pts, dtype=np.int32)
+    cv2.polylines(out, [left_arr], False, OVERLAY_COLORS["guide"], 2, cv2.LINE_AA)
+    cv2.polylines(out, [right_arr], False, OVERLAY_COLORS["guide"], 2, cv2.LINE_AA)
+
+    # ── Distance markers (horizontal lines) ──
+    marker_positions = [
+        (0.85, "10cm", OVERLAY_COLORS["red"]),
+        (0.75, "20cm", OVERLAY_COLORS["yellow"]),
+        (0.65, "30cm", OVERLAY_COLORS["yellow"]),
+        (0.55, "40cm", OVERLAY_COLORS["green"]),
+    ]
+    for y_frac, label, color in marker_positions:
+        y_px = int(h * y_frac)
+        t = (zone_bottom - y_px) / max(1, zone_bottom - green_top)
+        spread = half_car * (1.0 + t * 0.15)
+        x_left = int(cx - spread)
+        x_right = int(cx + spread)
+        cv2.line(out, (x_left, y_px), (x_right, y_px), color, 1, cv2.LINE_AA)
+        # Label with background
+        (tw, th_txt), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
+        lx = x_right + 5
+        ly = y_px + 4
+        cv2.rectangle(out, (lx - 2, ly - th_txt - 2), (lx + tw + 2, ly + 4),
+                      (20, 20, 20), -1)
+        cv2.putText(out, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                    (230, 230, 230), 1, cv2.LINE_AA)
+
+    # ── Dynamic trajectory curves (follow steering angle) ──
+    steer_norm = max(-1.0, min(1.0, steering))
+    if abs(steer_norm) > 0.02:  # Don't draw curves when nearly straight
+        traj_left = []
+        traj_right = []
+        for i in range(n_samples):
+            t = i / (n_samples - 1)
+            y = int(zone_bottom - t * (zone_bottom - green_top))
+            # Quadratic displacement: more curve at distance
+            x_offset = int(steer_norm * (t ** 2) * w * 0.25)
+            spread = half_car * (1.0 + t * 0.15)
+            traj_left.append((int(cx - spread + x_offset), y))
+            traj_right.append((int(cx + spread + x_offset), y))
+
+        tl_arr = np.array(traj_left, dtype=np.int32)
+        tr_arr = np.array(traj_right, dtype=np.int32)
+        # Draw dashed dynamic curves
+        traj_color = (0, 180, 255)  # orange
+        cv2.polylines(out, [tl_arr], False, traj_color, 2, cv2.LINE_AA)
+        cv2.polylines(out, [tr_arr], False, traj_color, 2, cv2.LINE_AA)
+
+        # Trajectory center line
+        center_pts = []
+        for i in range(n_samples):
+            t = i / (n_samples - 1)
+            y = int(zone_bottom - t * (zone_bottom - green_top))
+            x_offset = int(steer_norm * (t ** 2) * w * 0.25)
+            center_pts.append((cx + x_offset, y))
+        center_arr = np.array(center_pts, dtype=np.int32)
+        cv2.polylines(out, [center_arr], False, (255, 255, 0), 1, cv2.LINE_AA)
 
     return out
 
@@ -229,6 +380,8 @@ def main() -> int:
     angle = 0.0
     test_angles = [-1.0, -0.5, 0.0, 0.5, 1.0]
     test_idx = -1
+    show_overlay = args.overlay
+    car_w_ratio = args.car_width_cm / 65.0  # rough cm-to-ratio (65cm ≈ full width)
 
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
     print("[TELEOP] Ready. Controls: Z/S/Q/D + simultaneous. ESC=quit.")
@@ -287,6 +440,10 @@ def main() -> int:
                     angle = 0.0
                     test_idx = -1
 
+                if keyboard.is_pressed('o'):
+                    show_overlay = not show_overlay
+                    time.sleep(0.3)  # anti-rebond
+
             # Décélération auto si aucune touche gaz
             if not throttle_active:
                 speed *= DECEL_FACTOR
@@ -322,6 +479,8 @@ def main() -> int:
             # ── Display ──
             frame = video.get_frame()
             if frame is not None:
+                if show_overlay:
+                    frame = draw_parking_overlay(frame, angle, car_w_ratio)
                 view = draw_hud(frame, video.fps, speed, angle,
                                 video.connected, cmd_ok, tstate)
                 cv2.imshow(WINDOW_NAME, view)
