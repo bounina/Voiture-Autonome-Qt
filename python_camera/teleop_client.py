@@ -398,7 +398,7 @@ def main() -> int:
         print("[PARKING] parking_detector.py introuvable — détection désactivée")
 
     detect_lock = threading.Lock()
-    detect_results: dict = {"spots": [], "mask": None, "active": False}
+    detect_results: dict = {"spots": [], "mask": None, "h_lines": [], "v_lines": [], "active": False}
 
     # Shared state
     state_lock = threading.Lock()
@@ -504,10 +504,12 @@ def main() -> int:
                 continue
             fr = video.get_frame()
             if fr is not None:
-                spots, mask = detector.detect(fr)
+                spots, mask, h_lines, v_lines = detector.detect(fr)
                 with detect_lock:
                     detect_results["spots"] = spots
                     detect_results["mask"] = mask
+                    detect_results["h_lines"] = h_lines
+                    detect_results["v_lines"] = v_lines
                     detect_results["active"] = True
             time.sleep(0.2)  # ~5 Hz pour ne pas surcharger le CPU
 
@@ -530,7 +532,10 @@ def main() -> int:
                     with detect_lock:
                         sp = detect_results["spots"]
                         mk = detect_results["mask"]
-                    detector.draw_detections(frame, sp, show_mask=True, mask=mk)
+                        hl = detect_results["h_lines"]
+                        vl = detect_results["v_lines"]
+                    detector.draw_detections(frame, sp, h_lines=hl,
+                                             v_lines=vl, show_mask=True, mask=mk)
                 draw_hud(frame, video.fps, float(s["speed"]), float(s["angle"]),
                          video.connected, bool(s["cmd_ok"]), str(s["tstate"]))
                 cv2.imshow(WINDOW_NAME, frame)
