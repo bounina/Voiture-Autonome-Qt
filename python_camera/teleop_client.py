@@ -138,6 +138,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--car-width-cm", type=float, default=20.0,
                    help="Largeur du véhicule en cm")
     p.add_argument("--overlay", action="store_true", default=True)
+    # UDP relay vers CarPlay (envoie le frame AVEC overlay)
+    p.add_argument("--udp-ip", type=str, default=None,
+                   help="IP cible pour relayer le flux avec overlay en UDP (ex: 192.168.1.196)")
+    p.add_argument("--udp-port", type=int, default=4444,
+                   help="Port UDP cible (default: 4444)")
     return p.parse_args()
 
 def recv_exact(sock: socket.socket, size: int) -> bytes:
@@ -388,6 +393,12 @@ def main() -> int:
 
     car_half_cm = args.car_width_cm / 2.0
 
+    # UDP relay socket (pour CarPlay — envoie le frame avec overlay)
+    udp_relay = None
+    if args.udp_ip:
+        udp_relay = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        print(f"[UDP] Relay activé → {args.udp_ip}:{args.udp_port} (avec overlay)")
+
     # Parking detection
     try:
         from parking_detector import ParkingDetector
@@ -538,6 +549,20 @@ def main() -> int:
                                              v_lines=vl, show_mask=True, mask=mk)
                 draw_hud(frame, video.fps, float(s["speed"]), float(s["angle"]),
                          video.connected, bool(s["cmd_ok"]), str(s["tstate"]))
+
+                # Relay UDP vers CarPlay (frame complet avec overlay)
+                if udp_relay is not None:
+                    ok, jpeg = cv2.imencode(".jpg", frame,
+                                            [cv2.IMWRITE_JPEG_QUALITY, 50])
+                    if ok:
+                        udp_data = jpeg.tobytes()
+                        if len(udp_data) < 65000:
+                            try:
+                                udp_relay.sendto(udp_data,
+                                                 (args.udp_ip, args.udp_port))
+                            except OSError:
+                                pass
+
                 cv2.imshow(WINDOW_NAME, frame)
 
             if cv2.waitKey(15) & 0xFF == 27:
