@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-video_streamer.py — Serveur de streaming vidéo JPEG-over-TCP.
+video_streamer.py — Serveur de streaming vidéo JPEG (TCP + UDP).
 
 Tourne sur la Raspberry Pi. Capture les frames via Picamera2,
-les encode en JPEG et les envoie à un client TCP unique sur le port 8885.
+les encode en JPEG et les envoie :
+  - En TCP (port 8885) vers teleop_client.py
+  - En UDP (port 4444) vers l'interface CarPlay Qt (optionnel)
 
-Protocole : [4 bytes uint32 big-endian = taille JPEG] [N bytes = données JPEG]
+Protocole TCP : [4 bytes uint32 big-endian = taille JPEG] [N bytes = données JPEG]
+Protocole UDP : [N bytes = données JPEG] (paquet unique, pas de header)
 
 Usage (sur la Pi via SSH) :
     python3 video_streamer.py
-    python3 video_streamer.py --port 8885 --width 640 --height 480 --quality 70 --rotate 180
+    python3 video_streamer.py --rotate 180
+    python3 video_streamer.py --rotate 180 --udp-ip 192.168.1.196
 """
 
 from __future__ import annotations
@@ -41,6 +45,11 @@ def parse_args() -> argparse.Namespace:
                         help="Force swap Red/Blue channels (use if colors are wrong)")
     parser.add_argument("--fov", choices=["normal", "wide"], default="wide",
                         help="FOV mode: 'wide' uses full sensor for max angle (default: wide)")
+    # UDP dual output (pour CarPlay Qt)
+    parser.add_argument("--udp-ip", type=str, default=None,
+                        help="IP cible pour l'envoi UDP (ex: 192.168.1.196). Sans cet arg, UDP désactivé.")
+    parser.add_argument("--udp-port", type=int, default=4444,
+                        help="Port UDP cible (default: 4444)")
     return parser.parse_args()
 
 
@@ -141,7 +150,15 @@ def main() -> int:
     server.settimeout(1.0)
     server.bind(("0.0.0.0", args.port))
     server.listen(1)
-    print(f"[STREAMER] Listening on 0.0.0.0:{args.port}")
+    print(f"[STREAMER] Listening TCP on 0.0.0.0:{args.port}")
+
+    # --- UDP socket (optionnel, pour CarPlay) ---
+    udp_sock = None
+    if args.udp_ip:
+        udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        print(f"[STREAMER] UDP activé → {args.udp_ip}:{args.udp_port}")
+    else:
+        print("[STREAMER] UDP désactivé (utilise --udp-ip pour activer)")
 
     min_frame_time = 1.0 / args.fps_cap if args.fps_cap > 0 else 0.0
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, args.quality]
@@ -191,14 +208,22 @@ def main() -> int:
                     try:
                         client.sendall(header + data)
                     except (BrokenPipeError, ConnectionResetError, OSError):
-                        print("[STREAMER] Client disconnected.")
+                        print("[STREAMER] Client TCP déconnecté.")
                         break
+
+                    # Envoi UDP en parallèle (si activé)
+                    if udp_sock and len(data) < 65000:
+                        try:
+                            udp_sock.sendto(data, (args.udp_ip, args.udp_port))
+                        except OSError:
+                            pass  # UDP = best effort, pas grave si ça rate
 
                     frame_count += 1
                     if frame_count % 100 == 0:
                         elapsed = time.perf_counter() - t_start
                         fps = frame_count / elapsed if elapsed > 0 else 0
-                        print(f"[STREAMER] Streaming... {fps:.1f} FPS, frame size ~{len(data)//1024}KB")
+                        udp_status = f" + UDP→{args.udp_ip}" if udp_sock else ""
+                        print(f"[STREAMER] {fps:.1f} FPS, ~{len(data)//1024}KB{udp_status}")
 
                     # FPS cap
                     elapsed = time.perf_counter() - t0
