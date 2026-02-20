@@ -164,74 +164,66 @@ def main() -> int:
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, args.quality]
 
     try:
+        client = None
+        frame_count = 0
+        t_start = time.perf_counter()
+
         while not stop:
-            # Wait for a client connection
-            print("[STREAMER] Waiting for client...")
-            client = None
-            while not stop and client is None:
+            t0 = time.perf_counter()
+
+            # --- Accepter un client TCP (non bloquant) ---
+            if client is None:
                 try:
                     client, addr = server.accept()
                     client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                    print(f"[STREAMER] Client connected: {addr}")
+                    print(f"[STREAMER] Client TCP connecté : {addr}")
                 except socket.timeout:
-                    continue
+                    pass  # Pas de client, on continue quand même
 
-            if stop or client is None:
-                break
+            # --- Capturer un frame ---
+            raw = picam2.capture_array()
+            bgr = convert_to_bgr(raw, swap_rb=args.swap_rb)
+            bgr = apply_orientation(bgr, args.rotate, args.flip)
 
-            # Stream frames to this client
-            frame_count = 0
-            t_start = time.perf_counter()
-            try:
-                while not stop:
-                    t0 = time.perf_counter()
+            if frame_count == 0:
+                print(f"[DIAG] Raw frame: shape={raw.shape}, dtype={raw.dtype}")
+                print(f"[DIAG] swap_rb = {args.swap_rb}")
 
-                    raw = picam2.capture_array()
-                    bgr = convert_to_bgr(raw, swap_rb=args.swap_rb)
-                    bgr = apply_orientation(bgr, args.rotate, args.flip)
+            ok, jpeg = cv2.imencode(".jpg", bgr, encode_params)
+            if not ok:
+                continue
 
-                    # Print diagnostic info for the very first frame
-                    if frame_count == 0:
-                        print(f"[DIAG] Raw frame: shape={raw.shape}, dtype={raw.dtype}")
-                        print(f"[DIAG] Pixel [100,100] raw = {raw[100,100]}")
-                        print(f"[DIAG] Pixel [100,100] bgr = {bgr[100,100]}")
-                        print(f"[DIAG] swap_rb = {args.swap_rb}")
-                        print(f"[DIAG] Si couleurs inversées, relance avec: --swap-rb")
+            data = jpeg.tobytes()
 
-                    ok, jpeg = cv2.imencode(".jpg", bgr, encode_params)
-                    if not ok:
-                        continue
+            # --- Envoi TCP (si un client est connecté) ---
+            if client is not None:
+                header = struct.pack(">I", len(data))
+                try:
+                    client.sendall(header + data)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    print("[STREAMER] Client TCP déconnecté.")
+                    client.close()
+                    client = None
 
-                    data = jpeg.tobytes()
-                    header = struct.pack(">I", len(data))
+            # --- Envoi UDP (toujours, même sans client TCP) ---
+            if udp_sock and len(data) < 65000:
+                try:
+                    udp_sock.sendto(data, (args.udp_ip, args.udp_port))
+                except OSError:
+                    pass
 
-                    try:
-                        client.sendall(header + data)
-                    except (BrokenPipeError, ConnectionResetError, OSError):
-                        print("[STREAMER] Client TCP déconnecté.")
-                        break
+            frame_count += 1
+            if frame_count % 100 == 0:
+                elapsed = time.perf_counter() - t_start
+                fps = frame_count / elapsed if elapsed > 0 else 0
+                tcp_status = "TCP:✓" if client else "TCP:—"
+                udp_status = f" UDP→{args.udp_ip}" if udp_sock else ""
+                print(f"[STREAMER] {fps:.1f} FPS, ~{len(data)//1024}KB [{tcp_status}{udp_status}]")
 
-                    # Envoi UDP en parallèle (si activé)
-                    if udp_sock and len(data) < 65000:
-                        try:
-                            udp_sock.sendto(data, (args.udp_ip, args.udp_port))
-                        except OSError:
-                            pass  # UDP = best effort, pas grave si ça rate
-
-                    frame_count += 1
-                    if frame_count % 100 == 0:
-                        elapsed = time.perf_counter() - t_start
-                        fps = frame_count / elapsed if elapsed > 0 else 0
-                        udp_status = f" + UDP→{args.udp_ip}" if udp_sock else ""
-                        print(f"[STREAMER] {fps:.1f} FPS, ~{len(data)//1024}KB{udp_status}")
-
-                    # FPS cap
-                    elapsed = time.perf_counter() - t0
-                    if elapsed < min_frame_time:
-                        time.sleep(min_frame_time - elapsed)
-
-            finally:
-                client.close()
+            # FPS cap
+            elapsed = time.perf_counter() - t0
+            if elapsed < min_frame_time:
+                time.sleep(min_frame_time - elapsed)
 
     finally:
         picam2.stop()
