@@ -10,12 +10,13 @@
 - [Architecture système](#architecture-système)
 - [Communication réseau](#communication-réseau)
 - [Téléopération RC](#téléopération-rc)
+- [Caméra de recul & Overlay](#caméra-de-recul--overlay)
 - [Chaîne de commande matérielle](#chaîne-de-commande-matérielle)
 - [Mode autonome PID](#mode-autonome-pid)
 - [Configuration matérielle](#configuration-matérielle)
 - [Installation](#installation)
 - [Mode d'emploi](#mode-demploi)
-- [Structure des dépôts](#structure-des-dépôts)
+- [Structure des fichiers](#structure-des-fichiers)
 - [Problèmes résolus](#problèmes-résolus)
 - [Workflow Git](#workflow-git)
 
@@ -193,12 +194,11 @@ Vitesse
 | Paramètre | Valeur | Description |
 |-----------|--------|-------------|
 | `MAX_FWD_SPEED` | 0.18 | Vitesse max avant |
-| `MAX_BWD_SPEED` | -0.12 | Vitesse max arrière |
+| `MAX_BWD_SPEED` | -0.15 | Vitesse max arrière |
 | `ACCEL_STEP` | 0.012 | Accélération par tick |
-| `KICK_START` | 0.06 | Boost initial (franchit l'inertie) |
+| `KICK_START` | 0.08 | Boost initial (franchit l'inertie) |
 | `DECEL_FACTOR` | 0.90 | Multiplicateur décélération auto |
 | `ANGLE_STEP` | 0.08 | Incrément direction par tick |
-| `ANGLE_RETURN` | 0.04 | Rappel automatique au centre |
 
 ---
 
@@ -274,6 +274,34 @@ Le mode autonome utilise :
 Pour réactiver : `modeManuel{false}` dans `controleur.h` ou commande TCP `AUTO:ON`.
 
 Le code PID (`computeError`, `pid.update`, `speedCtrl.update`) est **100% intact**.
+
+---
+
+## Caméra de recul & Overlay
+
+Le système intègre un **overlay de caméra de recul style OEM** (Audi/VW) avec :
+
+- **Trapèze semi-transparent** divisé en 3 zones de couleur (proche → loin)
+- **Ligne rouge de sécurité** en bas (zone pare-chocs)
+- **Courbes de trajectoire dynamiques** (orange) qui suivent l'angle de braquage en temps réel
+- **HUD minimaliste** : FPS, état connexion, vitesse, indicateur de braquage
+
+### Calibration de l'overlay
+
+L'overlay est calibrable interactivement :
+
+```bash
+python python_camera/calibrate_overlay.py --pi-ip <IP_PI>
+```
+
+1. Capture un frame de la caméra
+2. Affiche 4 coins draggables à la souris
+3. Appuyer sur **Entrée** sauvegarde dans `overlay_calib.json`
+4. `teleop_client.py` charge automatiquement la calibration au démarrage
+
+| Touche | Action |
+|--------|--------|
+| **O** | Activer/désactiver l'overlay |
 
 ---
 
@@ -364,36 +392,34 @@ Cliquez sur la fenêtre vidéo, puis utilisez **Z/S/Q/D** (combinables).
 
 ---
 
-## Structure des dépôts
-
-### 📁 [Voiture-Autonome-Qt](https://github.com/bounina/Voiture-Autonome-Qt)
+## Structure des fichiers
 
 ```
 Voiture-Autonome-Qt/
-├── controleur.cpp/h        ← PID + mode manuel TELEOP
-├── serveurtcp.cpp/h        ← Serveur TCP port 8884
-├── mainwindow.cpp/h        ← Câblage signaux/slots Qt
-├── materielreel.cpp/h      ← I2C moteur + servo direction
-├── servomoteur.cpp/h       ← PWM servo (pwmchip0/pwm0)
-├── pwm.cpp/h               ← Accès sysfs PWM
-├── tfmini.cpp/h            ← Capteur distance frontal
-├── sae_sbc.pro             ← Projet Qt
-├── RESUME_ARCHITECTURE.txt ← Documentation technique détaillée
-├── README.md               ← Ce fichier
-└── python_camera/
-    ├── teleop_client.py    ← [PC] Client téléop multi-thread
-    ├── video_streamer.py   ← [PI] Serveur streaming JPEG
-    └── test_servo_gpio.py  ← [PI] Diagnostic PWM servo
-```
-
-### 📁 [Camera_arriere](https://github.com/bounina/Camera_arriere)
-
-```
-Camera_arriere/
-└── src/
-    ├── video_streamer.py   ← [PI] Serveur streaming
-    ├── teleop_client.py    ← [PC] Client téléopération
-    └── phase3_calibrate    ← [PI] Calibration parking
+│
+├── 📄 C++ (Raspberry Pi — programme embarqué)
+│   ├── controleur.cpp/h        → Boucle PID + mode manuel TELEOP
+│   ├── serveurtcp.cpp/h        → Serveur TCP port 8884
+│   ├── mainwindow.cpp/h        → Interface Qt + signaux/slots
+│   ├── materielreel.cpp/h      → I2C moteur + servo direction
+│   ├── servomoteur.cpp/h       → PWM servo (pwmchip0/pwm0)
+│   ├── pwm.cpp/h               → Accès sysfs PWM
+│   └── tfmini.cpp/h            → Capteur distance frontal
+│
+├── 🐍 python_camera/ (scripts Python)
+│   ├── video_streamer.py       → [PI] Serveur streaming JPEG-over-TCP
+│   ├── teleop_client.py        → [PC] Client téléop + overlay + HUD
+│   ├── calibrate_overlay.py    → [PC] Calibration interactive du trapèze
+│   ├── calibrate_parking.py    → [PC] Calibration distances (ancien)
+│   ├── overlay_calib.json      → Positions des 4 coins du trapèze
+│   └── test_servo_gpio.py      → [PI] Diagnostic PWM
+│
+├── 📝 Documentation
+│   ├── README.md               → Documentation principale
+│   ├── GUIDE_DEMARRAGE.md      → Guide de prise en main rapide
+│   └── RESUME_ARCHITECTURE.txt → Architecture technique détaillée
+│
+└── sae_sbc.pro                 → Fichier projet Qt
 ```
 
 ---

@@ -46,9 +46,9 @@ def is_key(name: str) -> bool:
 WINDOW_NAME    = "Teleop - Voiture Autonome"
 
 MAX_FWD_SPEED  = 0.18
-MAX_BWD_SPEED  = -0.12
+MAX_BWD_SPEED  = -0.15
 ACCEL_STEP     = 0.012
-KICK_START     = 0.06
+KICK_START     = 0.08
 DECEL_FACTOR   = 0.90
 DEAD_ZONE      = 0.015
 
@@ -59,6 +59,7 @@ CONTROL_HZ     = 30
 
 # ═══════════════════════ CALIBRATION (from parking_calib.json) ════════════
 CALIB_FILE = Path(__file__).parent / "parking_calib.json"
+OVERLAY_CALIB_FILE = Path(__file__).parent / "overlay_calib.json"
 
 def _load_calib() -> list | None:
     if not CALIB_FILE.exists():
@@ -70,6 +71,28 @@ def _load_calib() -> list | None:
         return sorted(pts, key=lambda p: p["dist_cm"]) if len(pts) >= 2 else None
     except (json.JSONDecodeError, KeyError):
         return None
+
+# Valeurs par défaut du trapèze (fractions d'écran)
+_DEFAULT_OVERLAY = {
+    "top_left":     [0.30, 0.35],
+    "top_right":    [0.70, 0.35],
+    "bottom_left":  [0.00, 0.95],
+    "bottom_right": [1.00, 0.95],
+}
+
+def _load_overlay_calib() -> dict:
+    if OVERLAY_CALIB_FILE.exists():
+        try:
+            with open(OVERLAY_CALIB_FILE) as f:
+                data = json.load(f)
+            # Vérifier que les 4 clés existent
+            for k in ("top_left", "top_right", "bottom_left", "bottom_right"):
+                if k not in data or len(data[k]) != 2:
+                    return _DEFAULT_OVERLAY.copy()
+            return data
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return _DEFAULT_OVERLAY.copy()
 
 def _lerp(a: float, b: float, t: float) -> float:
     return a + (b - a) * t
@@ -166,98 +189,118 @@ def draw_hud(frame: np.ndarray, fps: float, speed: float, angle: float,
              video_ok: bool, cmd_ok: bool, throttle_state: str) -> None:
     h, w = frame.shape[:2]
 
-    # Dark bar at top
-    sub = frame[0:130, 0:w]
-    sub[:] = (sub * 0.4 + np.array([20, 20, 20]) * 0.6).astype(np.uint8)
+    # Dark gradient/transparent bar at top
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, 0), (w, 40), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
 
     vid_color = (0, 255, 0) if video_ok else (0, 0, 255)
     cmd_color = (0, 255, 0) if cmd_ok else (0, 0, 255)
-    cv2.putText(frame, f"FPS: {fps:.0f}", (10, 28),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
-    cv2.putText(frame, f"VIDEO: {'OK' if video_ok else 'LOST'}", (150, 28),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, vid_color, 2, cv2.LINE_AA)
-    cv2.putText(frame, f"CMD: {'OK' if cmd_ok else 'DISCONN'}", (370, 28),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, cmd_color, 2, cv2.LINE_AA)
+    
+    cv2.putText(frame, f"FPS: {fps:.0f}", (10, 25),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
+    cv2.putText(frame, f"VID: {'OK' if video_ok else 'LOST'}", (120, 25),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, vid_color, 1, cv2.LINE_AA)
+    cv2.putText(frame, f"CMD: {'OK' if cmd_ok else 'LOST'}", (240, 25),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, cmd_color, 1, cv2.LINE_AA)
 
     speed_pct = abs(speed) / MAX_FWD_SPEED * 100
-    sc = (0, 255, 0) if speed > 0 else ((0, 100, 255) if speed < 0 else (200, 200, 200))
-    cv2.putText(frame, f"Speed: {speed_pct:.0f}% ({throttle_state})", (10, 62),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.65, sc, 2, cv2.LINE_AA)
-    cv2.putText(frame, f"Angle: {angle:+.2f}", (10, 92),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
+    sc = (0, 255, 0) if speed > 0 else ((0, 150, 255) if speed < 0 else (150, 150, 150))
+    cv2.putText(frame, f"{speed_pct:.0f}%", (w - 70, 28),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, sc, 2, cv2.LINE_AA)
+    cv2.putText(frame, throttle_state, (w - 130, 27),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, sc, 1, cv2.LINE_AA)
 
-    # Steering bar
-    bar_cx, bar_y, bar_hw = w // 2, 118, 150
+    # Steering indicator at the bottom
+    bar_cx, bar_y, bar_hw = w // 2, h - 30, 100
     cv2.line(frame, (bar_cx - bar_hw, bar_y), (bar_cx + bar_hw, bar_y),
-             (100, 100, 100), 3, cv2.LINE_AA)
+             (100, 100, 100), 2, cv2.LINE_AA)
+    cv2.line(frame, (bar_cx, bar_y - 6), (bar_cx, bar_y + 6),
+             (150, 150, 150), 1, cv2.LINE_AA)
+    
     needle_x = int(bar_cx + angle * bar_hw)
-    cv2.circle(frame, (needle_x, bar_y), 8, (0, 200, 255), -1, cv2.LINE_AA)
+    cv2.circle(frame, (needle_x, bar_y), 7, (0, 200, 255), -1, cv2.LINE_AA)
 
-    cv2.putText(frame, "Z:Accel S:Recule Q+D:Direction ESPACE:Stop T:Test R:Centre O:Overlay ESC:Quit",
-                (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (180, 180, 180), 1, cv2.LINE_AA)
+    cv2.putText(frame, "Z:Fwd S:Bwd Q:L D:R ESP:Stop O:Overlay ESC:Quit",
+                (10, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (180, 180, 180), 1, cv2.LINE_AA)
 
 
 def draw_parking_overlay(frame: np.ndarray, steering: float,
-                         car_half_cm: float, calib: list | None) -> None:
-    """Overlay minimaliste style Toyota/Honda."""
+                         car_half_cm: float, calib: list | None,
+                         overlay_cfg: dict | None = None) -> None:
+    """Overlay premium style OEM Audi/VW.
+    Utilise overlay_calib.json (4 coins) si disponible, sinon défauts."""
     h, w = frame.shape[:2]
     cx = w // 2
 
-    if calib is None or len(calib) < 2:
-        cv2.putText(frame, "PAS DE CALIBRATION - python calibrate_parking.py --pi-ip ...",
-                    (10, h - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
-                    (0, 0, 255), 1, cv2.LINE_AA)
-        return
+    cfg = overlay_cfg if overlay_cfg else _DEFAULT_OVERLAY
 
-    d_min = calib[0]["dist_cm"]
-    d_max = calib[-1]["dist_cm"]
+    # Coins du trapèze (en pixels)
+    tl_x, tl_y = int(cfg["top_left"][0] * w),     int(cfg["top_left"][1] * h)
+    tr_x, tr_y = int(cfg["top_right"][0] * w),    int(cfg["top_right"][1] * h)
+    bl_x, bl_y = int(cfg["bottom_left"][0] * w),  int(cfg["bottom_left"][1] * h)
+    br_x, br_y = int(cfg["bottom_right"][0] * w), int(cfg["bottom_right"][1] * h)
 
-    # Config : 3 lignes de distance (rouge/jaune/vert)
-    lines_cfg = [
-        (d_min,                _RED,    2),
-        ((d_min + d_max) / 2,  _YELLOW, 2),
-        (d_max,                _GREEN,  2),
-    ]
+    # On divise le trapèze en 3 zones horizontales (bas=proche, haut=loin)
+    # t=0 → bottom, t=1 → top
+    def row(t: float):
+        """Retourne (x_left, x_right, y) pour une fraction t du trapèze."""
+        lx = int(bl_x + t * (tl_x - bl_x))
+        rx = int(br_x + t * (tr_x - br_x))
+        ly = int(bl_y + t * (tl_y - bl_y))
+        return lx, rx, ly
 
-    # ── Guide lines (largeur véhicule, convergentes) ──
+    overlay = frame.copy()
+
+    # 1. Zones colorées (3 bandes horizontales dans le trapèze)
+    # Zone 1 : 0% → 33% (proche, bleu clair)
+    lx0, rx0, y0 = row(0.0)
+    lx1, rx1, y1 = row(0.33)
+    poly_z1 = np.array([[lx0, y0], [rx0, y0], [rx1, y1], [lx1, y1]], np.int32)
+    cv2.fillPoly(overlay, [poly_z1], (220, 60, 60))
+
+    # Zone 2 : 33% → 66% (moyen, bleu moyen)
+    lx2, rx2, y2 = row(0.66)
+    poly_z2 = np.array([[lx1, y1], [rx1, y1], [rx2, y2], [lx2, y2]], np.int32)
+    cv2.fillPoly(overlay, [poly_z2], (180, 50, 50))
+
+    # Zone 3 : 66% → 100% (loin, bleu foncé)
+    lx3, rx3, y3 = row(1.0)
+    poly_z3 = np.array([[lx2, y2], [rx2, y2], [rx3, y3], [lx3, y3]], np.int32)
+    cv2.fillPoly(overlay, [poly_z3], (140, 40, 40))
+
+    cv2.addWeighted(overlay, 0.4, frame, 0.6, 0, frame)
+
+    # 2. Ligne critique pare-chocs (Rouge épais, en bas du trapèze)
+    cv2.line(frame, (lx0, y0), (rx0, y0), (0, 0, 255), 4, cv2.LINE_AA)
+
+    # 3. Lignes de séparation noires entre les 3 zones
+    cv2.line(frame, (lx1, y1), (rx1, y1), (0, 0, 0), 1, cv2.LINE_AA)
+    cv2.line(frame, (lx2, y2), (rx2, y2), (0, 0, 0), 1, cv2.LINE_AA)
+    cv2.line(frame, (lx3, y3), (rx3, y3), (0, 0, 0), 1, cv2.LINE_AA)
+
+    # 4. Courbes de trajectoire dynamiques (Orange)
+    # Inversion du signe : caméra arrière → D (steer>0) donne courbe à gauche
+    steer = -max(-1.0, min(1.0, steering))
     n = 30
-    left_pts  = np.empty((n, 2), dtype=np.int32)
-    right_pts = np.empty((n, 2), dtype=np.int32)
+    l_dyn = np.empty((n, 2), dtype=np.int32)
+    r_dyn = np.empty((n, 2), dtype=np.int32)
+
+    curvature_factor = 150.0  # Adapté à ±40° de braquage réel
+
     for i in range(n):
-        t = i / (n - 1)
-        d = d_min + t * (d_max - d_min)
-        y = _interp_y(h, calib, d)
-        hw = int(car_half_cm * _interp_ppcm(calib, d))
-        left_pts[i]  = (cx - hw, y)
-        right_pts[i] = (cx + hw, y)
+        t = i / (n - 1)  # 0 = bas, 1 = haut
+        lx, rx, y = row(t)
 
-    cv2.polylines(frame, [left_pts],  False, _WHITE, 2, cv2.LINE_AA)
-    cv2.polylines(frame, [right_pts], False, _WHITE, 2, cv2.LINE_AA)
+        # Décalage latéral dû au braquage (quadratique, doux)
+        lat_off = int(steer * (t ** 2) * curvature_factor)
 
-    # ── Lignes de distance horizontales ──
-    for dist, color, thick in lines_cfg:
-        y = _interp_y(h, calib, dist)
-        hw = int(car_half_cm * _interp_ppcm(calib, dist))
-        xl, xr = cx - hw, cx + hw
-        cv2.line(frame, (xl, y), (xr, y), color, thick, cv2.LINE_AA)
-        cv2.putText(frame, f"{int(dist)}cm", (xr + 6, y + 4),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, color, 1, cv2.LINE_AA)
+        l_dyn[i] = (lx + lat_off, y)
+        r_dyn[i] = (rx + lat_off, y)
 
-    # ── Courbes de trajectoire dynamiques ──
-    steer = max(-1.0, min(1.0, steering))
-    if abs(steer) > 0.03:
-        tl = np.empty((n, 2), dtype=np.int32)
-        tr = np.empty((n, 2), dtype=np.int32)
-        for i in range(n):
-            t = i / (n - 1)
-            d = d_min + t * (d_max - d_min)
-            y = _interp_y(h, calib, d)
-            hw = int(car_half_cm * _interp_ppcm(calib, d))
-            x_off = int(steer * (t ** 2) * w * 0.20)
-            tl[i] = (cx - hw + x_off, y)
-            tr[i] = (cx + hw + x_off, y)
-        cv2.polylines(frame, [tl], False, _ORANGE, 2, cv2.LINE_AA)
-        cv2.polylines(frame, [tr], False, _ORANGE, 2, cv2.LINE_AA)
+    dyn_color = (0, 165, 255)  # Orange (BGR)
+    cv2.polylines(frame, [l_dyn], False, dyn_color, 3, cv2.LINE_AA)
+    cv2.polylines(frame, [r_dyn], False, dyn_color, 3, cv2.LINE_AA)
 
 
 # ═══════════════════════ VIDEO RECEIVER ═══════════════════════════════════
@@ -334,7 +377,14 @@ def main() -> int:
     if calib:
         print(f"[CALIB] Loaded {len(calib)} points from {CALIB_FILE}")
     else:
-        print("[CALIB] No calibration file — overlay will show warning")
+        print("[CALIB] No calibration file — overlay will use defaults")
+
+    # Load overlay trapezoid calibration
+    overlay_cfg = _load_overlay_calib()
+    if OVERLAY_CALIB_FILE.exists():
+        print(f"[OVERLAY] Loaded corners from {OVERLAY_CALIB_FILE}")
+    else:
+        print("[OVERLAY] Using default trapezoid (run calibrate_overlay.py to customize)")
 
     car_half_cm = args.car_width_cm / 2.0
 
@@ -436,7 +486,7 @@ def main() -> int:
                     s = state.copy()
                 if s["show_overlay"]:
                     draw_parking_overlay(frame, float(s["angle"]),
-                                         car_half_cm, calib)
+                                         car_half_cm, calib, overlay_cfg)
                 draw_hud(frame, video.fps, float(s["speed"]), float(s["angle"]),
                          video.connected, bool(s["cmd_ok"]), str(s["tstate"]))
                 cv2.imshow(WINDOW_NAME, frame)

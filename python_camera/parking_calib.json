@@ -1,0 +1,30 @@
+{
+  "image_size": [
+    640,
+    480
+  ],
+  "tape_width_cm": 20,
+  "points": [
+    {
+      "dist_cm": 20,
+      "y_frac": 0.2896,
+      "center_x": 309,
+      "center_y": 139,
+      "px_per_cm": 7.9
+    },
+    {
+      "dist_cm": 40,
+      "y_frac": 0.2313,
+      "center_x": 329,
+      "center_y": 111,
+      "px_per_cm": 6.2
+    },
+    {
+      "dist_cm": 60,
+      "y_frac": 0.1958,
+      "center_x": 331,
+      "center_y": 94,
+      "px_per_cm": 5.3
+    }
+  ]
+}
