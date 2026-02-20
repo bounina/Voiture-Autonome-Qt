@@ -8,7 +8,7 @@ Contrôles :
   Z+Q / Z+D = avancer ET tourner
   ESPACE = arrêt d'urgence
   T = test servo   R = recentrer direction
-  O = overlay on/off    ESC = quitter
+  O = overlay on/off    P = parking detection    ESC = quitter
 
 Dépendances : pip install opencv-python numpy
 Usage :       python teleop_client.py --pi-ip 192.168.1.42
@@ -33,7 +33,7 @@ _user32 = ctypes.windll.user32  # type: ignore[attr-defined]
 _VK = {
     'z': 0x5A, 's': 0x53, 'q': 0x51, 'd': 0x44,
     'space': 0x20, 'esc': 0x1B,
-    't': 0x54, 'r': 0x52, 'o': 0x4F,
+    't': 0x54, 'r': 0x52, 'o': 0x4F, 'p': 0x50,
 }
 
 def is_key(name: str) -> bool:
@@ -388,11 +388,23 @@ def main() -> int:
 
     car_half_cm = args.car_width_cm / 2.0
 
+    # Parking detection
+    try:
+        from parking_detector import ParkingDetector
+        detector = ParkingDetector()
+        print("[PARKING] Détecteur initialisé (touche P pour activer)")
+    except ImportError:
+        detector = None
+        print("[PARKING] parking_detector.py introuvable — détection désactivée")
+
+    detect_lock = threading.Lock()
+    detect_results: dict = {"spots": [], "mask": None, "active": False}
+
     # Shared state
     state_lock = threading.Lock()
     state = {
         "speed": 0.0, "angle": 0.0, "tstate": "STOP",
-        "cmd_ok": cmd_ok, "show_overlay": args.overlay, "quit": False,
+        "cmd_ok": cmd_ok, "show_overlay": args.overlay, "show_parking": False, "quit": False,
     }
 
     # ── Control thread ──
@@ -400,9 +412,11 @@ def main() -> int:
         nonlocal cmd_sock, cmd_ok
         speed = angle = 0.0
         show_overlay = args.overlay
+        show_parking = False
         test_angles = [-1.0, -0.5, 0.0, 0.5, 1.0]
         test_idx = -1
         t_prev = o_prev = False
+        p_prev = False
         last_cmd_time = 0.0
 
         while not state["quit"]:
@@ -444,6 +458,11 @@ def main() -> int:
                     show_overlay = not show_overlay
                 o_prev = o_now
 
+                p_now = is_key('p')
+                if p_now and not p_prev:
+                    show_parking = not show_parking
+                p_prev = p_now
+
             if not throttle_active:
                 speed *= DECEL_FACTOR
                 if abs(speed) < DEAD_ZONE:
@@ -452,7 +471,7 @@ def main() -> int:
             tstate = "STOP" if abs(speed) < DEAD_ZONE else ("FWD" if speed > 0 else "BWD")
 
             with state_lock:
-                state.update(speed=speed, angle=angle, tstate=tstate,
+                state.update(speed=speed, angle=angle, tstate=tstate, show_parking=show_parking,
                              show_overlay=show_overlay)
 
             now = time.perf_counter()
@@ -475,7 +494,27 @@ def main() -> int:
     ctrl.start()
 
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-    print("[TELEOP] Ready. Z/S/Q/D O=overlay ESC=quit")
+    # ── Detection thread ── 
+    def detection_loop():
+        while not state["quit"]:
+            with state_lock:
+                active = state.get("show_parking", False)
+            if not active or detector is None:
+                time.sleep(0.1)
+                continue
+            fr = video.get_frame()
+            if fr is not None:
+                spots, mask = detector.detect(fr)
+                with detect_lock:
+                    detect_results["spots"] = spots
+                    detect_results["mask"] = mask
+                    detect_results["active"] = True
+            time.sleep(0.2)  # ~5 Hz pour ne pas surcharger le CPU
+
+    det_thread = threading.Thread(target=detection_loop, daemon=True)
+    det_thread.start()
+
+    print("[TELEOP] Ready. Z/S/Q/D O=overlay P=parking ESC=quit")
 
     # ── Display loop (main thread) ──
     try:
@@ -487,6 +526,11 @@ def main() -> int:
                 if s["show_overlay"]:
                     draw_parking_overlay(frame, float(s["angle"]),
                                          car_half_cm, calib, overlay_cfg)
+                if s.get("show_parking") and detector is not None:
+                    with detect_lock:
+                        sp = detect_results["spots"]
+                        mk = detect_results["mask"]
+                    detector.draw_detections(frame, sp, show_mask=True, mask=mk)
                 draw_hud(frame, video.fps, float(s["speed"]), float(s["angle"]),
                          video.connected, bool(s["cmd_ok"]), str(s["tstate"]))
                 cv2.imshow(WINDOW_NAME, frame)
