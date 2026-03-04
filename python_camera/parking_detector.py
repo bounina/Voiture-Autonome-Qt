@@ -23,6 +23,7 @@ import numpy as np
 
 HSV_CONFIG_FILE = Path(__file__).parent / "hsv_config.json"
 KNN_MODEL_FILE = Path(__file__).parent / "knn_model.xml"
+KNN_NORM_FILE = Path(__file__).parent / "knn_norm.npz"
 
 _DEFAULT_HSV = {
     "h_min": 90, "s_min": 50, "v_min": 50,
@@ -82,11 +83,11 @@ class ParkingDetector:
                  merge_gap: int = 35,
                  knn_k: int = 5,
                  roi_top_frac: float = 0.4,
-                 downsample: int = 4):
+                 downsample: int = 2):
         """
         Args:
             roi_top_frac: fraction du haut de l'image à ignorer (0.4 = ignorer 40% haut)
-            downsample: facteur de réduction pour le KNN (4 = 4× plus petit)
+            downsample: facteur de réduction pour le KNN (2 = 2× plus petit)
         """
         self.angle_thresh = angle_thresh
         self.min_line_length = min_line_length
@@ -98,6 +99,10 @@ class ParkingDetector:
 
         self.kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
 
+        # Normalisation (chargée depuis knn_norm.npz)
+        self.norm_mean = None
+        self.norm_std = None
+
         # Charger le KNN ou fallback sur seuils HSV
         self.knn = None
         self.use_knn = False
@@ -107,22 +112,27 @@ class ParkingDetector:
             self.hsv_lower, self.hsv_upper = self._load_hsv()
 
     def _load_knn(self):
-        """Charge le modèle KNN depuis knn_model.xml."""
+        """Charge le modèle KNN et les stats de normalisation."""
         if KNN_MODEL_FILE.exists():
             try:
                 self.knn = cv2.ml.KNearest_load(str(KNN_MODEL_FILE))
                 self.use_knn = True
                 print(f"[PARKING] ✅ Modèle KNN chargé : {KNN_MODEL_FILE}")
-                print(f"[PARKING]    → Classification par apprentissage (K={self.knn_k})")
+
+                # Charger la normalisation
+                if KNN_NORM_FILE.exists():
+                    norm = np.load(KNN_NORM_FILE)
+                    self.norm_mean = norm["mean"].astype(np.float32)
+                    self.norm_std = norm["std"].astype(np.float32)
+                    print(f"[PARKING]    → 6D HSV+LAB normalisé (K={self.knn_k})")
+                else:
+                    print(f"[PARKING]    ⚠ Pas de knn_norm.npz — prédiction non normalisée")
             except Exception as e:
                 print(f"[PARKING] ⚠ Erreur chargement KNN : {e}")
                 self.use_knn = False
         else:
             print(f"[PARKING] Pas de modèle KNN ({KNN_MODEL_FILE})")
             print(f"[PARKING]    → Fallback sur seuils HSV manuels")
-            print(f"[PARKING]    → Pour de meilleurs résultats :")
-            print(f"[PARKING]      1. python collect_pixels.py --pi-ip <IP>")
-            print(f"[PARKING]      2. python train_knn.py")
 
     def _load_hsv(self) -> tuple[np.ndarray, np.ndarray]:
         cfg = _DEFAULT_HSV.copy()
@@ -139,21 +149,30 @@ class ParkingDetector:
         return lower, upper
 
     def _get_mask_knn(self, roi: np.ndarray) -> np.ndarray:
-        """Masque binaire via KNN — travaille sur une ROI déjà découpée.
-        
-        Downsample pour accélérer, puis upscale le résultat.
-        """
+        """Masque binaire via KNN 6D (HSV+LAB) avec downsampling."""
         h, w = roi.shape[:2]
         ds = self.downsample
 
-        # Réduire la résolution : 640×288 → 160×72 = 11 520 pixels au lieu de 184 320
+        # Réduire la résolution
         small = cv2.resize(roi, (w // ds, h // ds), interpolation=cv2.INTER_AREA)
-        hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+        sh, sw = small.shape[:2]
 
-        pixels = hsv.reshape(-1, 3).astype(np.float32)
+        # Extraire les 6 features : H, S, V, L, a, b
+        hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+        lab = cv2.cvtColor(small, cv2.COLOR_BGR2LAB)
+        pixels = np.hstack([
+            hsv.reshape(-1, 3),
+            lab.reshape(-1, 3),
+        ]).astype(np.float32)
+
+        # Normaliser si les stats sont disponibles
+        if self.norm_mean is not None and self.norm_std is not None:
+            pixels = (pixels - self.norm_mean) / self.norm_std
+
+        # Prédiction KNN
         _, results, _, _ = self.knn.findNearest(pixels, self.knn_k)
         small_mask = (results.flatten() == 1).astype(np.uint8) * 255
-        small_mask = small_mask.reshape(h // ds, w // ds)
+        small_mask = small_mask.reshape(sh, sw)
 
         # Remonter à la taille originale
         mask = cv2.resize(small_mask, (w, h), interpolation=cv2.INTER_NEAREST)

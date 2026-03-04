@@ -9,7 +9,7 @@ Mode d'emploi :
   4. Appuie N pour capturer un nouveau frame (angle/lumière différente)
   5. Appuie ENTRÉE pour sauvegarder, ESC pour annuler
 
-Les pixels sont stockés en HSV + label dans pixel_samples.npz.
+Features : 6 canaux (H, S, V, L, a, b) pour chaque pixel.
 Relance le script pour AJOUTER des pixels (il charge les anciens).
 
 Usage :
@@ -31,6 +31,9 @@ SAMPLES_FILE = Path(__file__).parent / "pixel_samples.npz"
 # Taille du carré de pixels collectés autour du clic (ex: 1 = carré 3×3)
 DEFAULT_PATCH_RADIUS = 1
 
+# Nombre de features par pixel (H, S, V, L, a, b)
+N_FEATURES = 6
+
 
 def recv_exact(sock: socket.socket, size: int) -> bytes:
     buf = b""
@@ -50,7 +53,6 @@ def capture_frame(ip: str, port: int) -> np.ndarray:
     s.connect((ip, port))
     s.settimeout(5.0)
 
-    # Skip warmup
     for _ in range(10):
         header = recv_exact(s, 4)
         frame_size = struct.unpack(">I", header)[0]
@@ -62,68 +64,78 @@ def capture_frame(ip: str, port: int) -> np.ndarray:
     return frame
 
 
+def extract_features(bgr_patch: np.ndarray) -> np.ndarray:
+    """Extrait les 6 features HSV+LAB d'un patch BGR.
+    
+    Returns: array (N, 6) avec colonnes [H, S, V, L, a, b].
+    """
+    hsv = cv2.cvtColor(bgr_patch, cv2.COLOR_BGR2HSV)
+    lab = cv2.cvtColor(bgr_patch, cv2.COLOR_BGR2LAB)
+    # Concaténer H,S,V,L,a,b
+    return np.hstack([
+        hsv.reshape(-1, 3),
+        lab.reshape(-1, 3),
+    ]).astype(np.float32)
+
+
 class PixelCollector:
     """Gère les clics souris et la collecte de pixels."""
 
     def __init__(self, frame: np.ndarray):
         self.frame = frame.copy()
         self.display = frame.copy()
-        self.hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         self.h, self.w = frame.shape[:2]
 
-        # Listes de pixels collectés
-        self.positives: list[np.ndarray] = []  # HSV des pixels bleus
-        self.negatives: list[np.ndarray] = []  # HSV des pixels non-bleus
+        self.positives: list[np.ndarray] = []
+        self.negatives: list[np.ndarray] = []
 
         self.n_pos = 0
         self.n_neg = 0
         self.radius = DEFAULT_PATCH_RADIUS
 
     def on_click(self, event, x, y, flags, param):
-        """Callback de la souris."""
         if event == cv2.EVENT_LBUTTONDOWN:
             self._collect_patch(x, y, label=1)
         elif event == cv2.EVENT_RBUTTONDOWN:
             self._collect_patch(x, y, label=0)
 
     def _collect_patch(self, cx: int, cy: int, label: int):
-        """Collecte un carré de pixels autour du clic."""
         r = self.radius
         y0 = max(0, cy - r)
         y1 = min(self.h, cy + r + 1)
         x0 = max(0, cx - r)
         x1 = min(self.w, cx + r + 1)
 
-        patch = self.hsv[y0:y1, x0:x1].reshape(-1, 3)
+        # Extraire le patch BGR
+        bgr_patch = self.frame[y0:y1, x0:x1]
+        features = extract_features(bgr_patch)
 
         if label == 1:
-            self.positives.append(patch)
-            self.n_pos += len(patch)
-            color = (0, 255, 0)  # Vert = bleu collecté
+            self.positives.append(features)
+            self.n_pos += len(features)
+            color = (0, 255, 0)
             tag = "+"
         else:
-            self.negatives.append(patch)
-            self.n_neg += len(patch)
-            color = (0, 0, 255)  # Rouge = non-bleu collecté
+            self.negatives.append(features)
+            self.n_neg += len(features)
+            color = (0, 0, 255)
             tag = "-"
 
-        # Dessiner le marqueur
         cv2.rectangle(self.display, (x0, y0), (x1, y1), color, 2)
         cv2.putText(self.display, tag, (cx - 5, cy - r - 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
 
-        print(f"  [{tag}] Pixel ({cx},{cy}) HSV moy: {patch.mean(axis=0).astype(int)}"
-              f"  |  Total: {self.n_pos} bleus, {self.n_neg} autres")
+        hsv_mean = features[:, :3].mean(axis=0).astype(int)
+        lab_mean = features[:, 3:].mean(axis=0).astype(int)
+        print(f"  [{tag}] ({cx},{cy}) HSV:{hsv_mean} LAB:{lab_mean}"
+              f"  |  Total: {self.n_pos} bleus, {self.n_neg} sol")
 
     def update_frame(self, frame: np.ndarray):
-        """Change le frame (nouvelle capture)."""
         self.frame = frame.copy()
         self.display = frame.copy()
-        self.hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         self.h, self.w = frame.shape[:2]
 
     def get_display(self) -> np.ndarray:
-        """Retourne le frame avec les marqueurs."""
         img = self.display.copy()
         sz = 2 * self.radius + 1
         info = f"BLEU(G):{self.n_pos}  SOL(D):{self.n_neg}  Taille:{sz}x{sz} (+/-)  N=frame  ENTREE=sauver"
@@ -134,12 +146,11 @@ class PixelCollector:
         return img
 
     def get_samples(self) -> tuple[np.ndarray, np.ndarray]:
-        """Retourne (X, y) — features HSV et labels."""
         if not self.positives and not self.negatives:
-            return np.empty((0, 3)), np.empty(0)
+            return np.empty((0, N_FEATURES)), np.empty(0)
 
-        pos = np.vstack(self.positives) if self.positives else np.empty((0, 3))
-        neg = np.vstack(self.negatives) if self.negatives else np.empty((0, 3))
+        pos = np.vstack(self.positives) if self.positives else np.empty((0, N_FEATURES))
+        neg = np.vstack(self.negatives) if self.negatives else np.empty((0, N_FEATURES))
 
         X = np.vstack([pos, neg])
         y = np.hstack([np.ones(len(pos)), np.zeros(len(neg))])
@@ -160,7 +171,7 @@ def main():
     cv2.setMouseCallback(win, collector.on_click)
 
     print("\n" + "=" * 60)
-    print("  COLLECTE DE PIXELS POUR LE CLASSIFIEUR KNN")
+    print("  COLLECTE DE PIXELS – Features HSV + LAB (6D)")
     print("=" * 60)
     print("  CLIC GAUCHE  = pixel SCOTCH BLEU (positif)")
     print("  CLIC DROIT   = pixel SOL / MUR (négatif)")
@@ -169,36 +180,39 @@ def main():
     print("  ENTRÉE       = sauvegarder et quitter")
     print("  ESC          = annuler")
     print("=" * 60)
-    print(f"  Rayon initial : {collector.radius}px → carré {2*collector.radius+1}×{2*collector.radius+1} (ajustable +/-)")
+    print(f"  6 features/pixel : H, S, V, L, a, b")
+    print(f"  Rayon initial : {collector.radius}px (ajustable +/-)")
     print("=" * 60 + "\n")
 
     while True:
         cv2.imshow(win, collector.get_display())
         key = cv2.waitKey(30) & 0xFF
 
-        if key == 27:  # ESC
+        if key == 27:
             print("[COLLECT] Annulé.")
             break
 
-        elif key in (13, 10):  # ENTER
+        elif key in (13, 10):
             X, y = collector.get_samples()
             if len(X) == 0:
                 print("[COLLECT] Aucun pixel collecté !")
                 continue
 
-            # Charger les anciens si existants
             if SAMPLES_FILE.exists():
                 old = np.load(SAMPLES_FILE)
                 X_old, y_old = old["X"], old["y"]
-                X = np.vstack([X_old, X])
-                y = np.hstack([y_old, y])
-                print(f"[COLLECT] Fusionné avec {len(X_old)} pixels existants")
+                if X_old.shape[1] == N_FEATURES:
+                    X = np.vstack([X_old, X])
+                    y = np.hstack([y_old, y])
+                    print(f"[COLLECT] Fusionné avec {len(X_old)} pixels existants")
+                else:
+                    print(f"[COLLECT] Ancien format ({X_old.shape[1]}D) → remplacé par 6D")
 
             np.savez(SAMPLES_FILE, X=X, y=y)
             n_pos = int(np.sum(y == 1))
             n_neg = int(np.sum(y == 0))
             print(f"\n✅ Sauvegardé dans : {SAMPLES_FILE}")
-            print(f"   Total : {n_pos} pixels bleus + {n_neg} pixels sol = {len(X)} pixels")
+            print(f"   Total : {n_pos} bleus + {n_neg} sol = {len(X)} pixels ({N_FEATURES}D)")
             print(f"\n→ Prochaine étape : python train_knn.py")
             break
 
@@ -207,19 +221,19 @@ def main():
             try:
                 frame = capture_frame(args.pi_ip, args.video_port)
                 collector.update_frame(frame)
-                print("[COLLECT] Nouveau frame chargé — continue à cliquer !")
+                print("[COLLECT] Nouveau frame chargé !")
             except Exception as e:
                 print(f"[COLLECT] Erreur capture : {e}")
 
         elif key in (ord('+'), ord('=')):
             collector.radius = min(collector.radius + 1, 15)
             sz = 2 * collector.radius + 1
-            print(f"[COLLECT] Curseur agrandi → {sz}×{sz}px")
+            print(f"[COLLECT] Curseur → {sz}×{sz}px")
 
         elif key == ord('-'):
             collector.radius = max(collector.radius - 1, 0)
             sz = 2 * collector.radius + 1
-            print(f"[COLLECT] Curseur réduit → {sz}×{sz}px")
+            print(f"[COLLECT] Curseur → {sz}×{sz}px")
 
     cv2.destroyAllWindows()
 
