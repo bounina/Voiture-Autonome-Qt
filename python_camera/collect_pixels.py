@@ -28,8 +28,8 @@ import numpy as np
 
 SAMPLES_FILE = Path(__file__).parent / "pixel_samples.npz"
 
-# Taille du carré de pixels collectés autour du clic (ex: 5 = carré 11×11)
-PATCH_RADIUS = 5
+# Taille du carré de pixels collectés autour du clic (ex: 1 = carré 3×3)
+DEFAULT_PATCH_RADIUS = 1
 
 
 def recv_exact(sock: socket.socket, size: int) -> bytes:
@@ -77,6 +77,7 @@ class PixelCollector:
 
         self.n_pos = 0
         self.n_neg = 0
+        self.radius = DEFAULT_PATCH_RADIUS
 
     def on_click(self, event, x, y, flags, param):
         """Callback de la souris."""
@@ -87,7 +88,7 @@ class PixelCollector:
 
     def _collect_patch(self, cx: int, cy: int, label: int):
         """Collecte un carré de pixels autour du clic."""
-        r = PATCH_RADIUS
+        r = self.radius
         y0 = max(0, cy - r)
         y1 = min(self.h, cy + r + 1)
         x0 = max(0, cx - r)
@@ -124,8 +125,8 @@ class PixelCollector:
     def get_display(self) -> np.ndarray:
         """Retourne le frame avec les marqueurs."""
         img = self.display.copy()
-        # Barre d'info en haut
-        info = f"BLEU(clic G): {self.n_pos}   SOL(clic D): {self.n_neg}   N=nouveau frame   ENTREE=sauver   ESC=annuler"
+        sz = 2 * self.radius + 1
+        info = f"BLEU(G):{self.n_pos}  SOL(D):{self.n_neg}  Taille:{sz}x{sz} (+/-)  N=frame  ENTREE=sauver"
         cv2.putText(img, info, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                     (0, 0, 0), 2, cv2.LINE_AA)
         cv2.putText(img, info, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
@@ -164,10 +165,11 @@ def main():
     print("  CLIC GAUCHE  = pixel SCOTCH BLEU (positif)")
     print("  CLIC DROIT   = pixel SOL / MUR (négatif)")
     print("  N            = capturer un NOUVEAU frame")
+    print("  +/-          = agrandir/réduire le curseur")
     print("  ENTRÉE       = sauvegarder et quitter")
     print("  ESC          = annuler")
     print("=" * 60)
-    print(f"  Rayon de collecte : {PATCH_RADIUS}px → carré {2*PATCH_RADIUS+1}×{2*PATCH_RADIUS+1}")
+    print(f"  Rayon initial : {collector.radius}px → carré {2*collector.radius+1}×{2*collector.radius+1} (ajustable +/-)")
     print("=" * 60 + "\n")
 
     while True:
@@ -208,6 +210,16 @@ def main():
                 print("[COLLECT] Nouveau frame chargé — continue à cliquer !")
             except Exception as e:
                 print(f"[COLLECT] Erreur capture : {e}")
+
+        elif key in (ord('+'), ord('=')):
+            collector.radius = min(collector.radius + 1, 15)
+            sz = 2 * collector.radius + 1
+            print(f"[COLLECT] Curseur agrandi → {sz}×{sz}px")
+
+        elif key == ord('-'):
+            collector.radius = max(collector.radius - 1, 0)
+            sz = 2 * collector.radius + 1
+            print(f"[COLLECT] Curseur réduit → {sz}×{sz}px")
 
     cv2.destroyAllWindows()
 

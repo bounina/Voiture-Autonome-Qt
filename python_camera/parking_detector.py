@@ -80,12 +80,21 @@ class ParkingDetector:
                  min_line_length: int = 40,
                  max_line_gap: int = 25,
                  merge_gap: int = 35,
-                 knn_k: int = 5):
+                 knn_k: int = 5,
+                 roi_top_frac: float = 0.4,
+                 downsample: int = 4):
+        """
+        Args:
+            roi_top_frac: fraction du haut de l'image à ignorer (0.4 = ignorer 40% haut)
+            downsample: facteur de réduction pour le KNN (4 = 4× plus petit)
+        """
         self.angle_thresh = angle_thresh
         self.min_line_length = min_line_length
         self.max_line_gap = max_line_gap
         self.merge_gap = merge_gap
         self.knn_k = knn_k
+        self.roi_top_frac = roi_top_frac
+        self.downsample = downsample
 
         self.kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
 
@@ -129,39 +138,45 @@ class ParkingDetector:
         upper = np.array([cfg["h_max"], cfg["s_max"], cfg["v_max"]])
         return lower, upper
 
-    def _get_mask_knn(self, frame: np.ndarray) -> np.ndarray:
-        """Masque binaire via le classifieur KNN (meilleur)."""
-        h, w = frame.shape[:2]
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    def _get_mask_knn(self, roi: np.ndarray) -> np.ndarray:
+        """Masque binaire via KNN — travaille sur une ROI déjà découpée.
+        
+        Downsample pour accélérer, puis upscale le résultat.
+        """
+        h, w = roi.shape[:2]
+        ds = self.downsample
 
-        # Reshape pour KNN : (H*W, 3) float32
+        # Réduire la résolution : 640×288 → 160×72 = 11 520 pixels au lieu de 184 320
+        small = cv2.resize(roi, (w // ds, h // ds), interpolation=cv2.INTER_AREA)
+        hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+
         pixels = hsv.reshape(-1, 3).astype(np.float32)
-
-        # Prédiction
         _, results, _, _ = self.knn.findNearest(pixels, self.knn_k)
-        mask = (results.flatten() == 1).astype(np.uint8) * 255
-        mask = mask.reshape(h, w)
+        small_mask = (results.flatten() == 1).astype(np.uint8) * 255
+        small_mask = small_mask.reshape(h // ds, w // ds)
 
-        # Nettoyage morphologique
+        # Remonter à la taille originale
+        mask = cv2.resize(small_mask, (w, h), interpolation=cv2.INTER_NEAREST)
+
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel, iterations=2)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.kernel, iterations=1)
 
         return mask
 
-    def _get_mask_hsv(self, frame: np.ndarray) -> np.ndarray:
+    def _get_mask_hsv(self, roi: np.ndarray) -> np.ndarray:
         """Masque binaire via seuils HSV (fallback)."""
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, self.hsv_lower, self.hsv_upper)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel, iterations=2)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.kernel, iterations=1)
         return mask
 
-    def _get_blue_mask(self, frame: np.ndarray) -> np.ndarray:
+    def _get_blue_mask(self, roi: np.ndarray) -> np.ndarray:
         """Masque binaire — KNN si disponible, sinon seuils HSV."""
         if self.use_knn:
-            return self._get_mask_knn(frame)
+            return self._get_mask_knn(roi)
         else:
-            return self._get_mask_hsv(frame)
+            return self._get_mask_hsv(roi)
 
     def _detect_lines(self, mask: np.ndarray) -> tuple[list, list]:
         edges = cv2.Canny(mask, 50, 150)
@@ -230,10 +245,26 @@ class ParkingDetector:
 
     def detect(self, frame: np.ndarray) -> tuple[list[dict], np.ndarray,
                                                    list, list]:
-        mask = self._get_blue_mask(frame)
+        """Pipeline complet avec ROI (ignore le haut de l'image)."""
+        h_full, w_full = frame.shape[:2]
+        y_start = int(h_full * self.roi_top_frac)
+
+        # Découper la ROI (bas de l'image = zone proche)
+        roi = frame[y_start:, :]
+        mask = self._get_blue_mask(roi)
         h_lines, v_lines = self._detect_lines(mask)
-        spots = self._find_spots(h_lines, v_lines, *frame.shape[:2])
-        return spots, mask, h_lines, v_lines
+
+        # Décaler toutes les coordonnées Y vers le frame complet
+        h_lines = [(x1, y1 + y_start, x2, y2 + y_start) for x1, y1, x2, y2 in h_lines]
+        v_lines = [(x1, y1 + y_start, x2, y2 + y_start) for x1, y1, x2, y2 in v_lines]
+
+        spots = self._find_spots(h_lines, v_lines, h_full, w_full)
+
+        # Créer un masque plein frame (haut = noir)
+        full_mask = np.zeros((h_full, w_full), dtype=np.uint8)
+        full_mask[y_start:, :] = mask
+
+        return spots, full_mask, h_lines, v_lines
 
     def draw_detections(self, frame: np.ndarray,
                         spots: list[dict],
@@ -242,6 +273,10 @@ class ParkingDetector:
                         show_mask: bool = False,
                         mask: np.ndarray | None = None) -> None:
         h_f, w_f = frame.shape[:2]
+
+        # Dessiner la limite de la ROI
+        roi_y = int(h_f * self.roi_top_frac)
+        cv2.line(frame, (0, roi_y), (w_f, roi_y), (100, 100, 100), 1, cv2.LINE_AA)
 
         if h_lines:
             for x1, y1, x2, y2 in h_lines:
