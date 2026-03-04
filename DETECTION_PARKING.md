@@ -216,3 +216,51 @@ Le passage au kart nécessite uniquement de **réentraîner** le KNN :
 | **Pipeline** | Identique | Identique |
 | **À refaire** | — | `collect_pixels.py` + `train_knn.py` |
 | **Code à modifier** | — | Rien |
+
+---
+
+## Méthodologie pas à pas
+
+### Étape 1 — Collecter des pixels (sur la Pi, depuis ton PC)
+
+```bash
+cd python_camera
+python collect_pixels.py --pi-ip <IP_DE_LA_PI>
+```
+
+1. Le script capture un frame depuis la caméra
+2. Une fenêtre s'ouvre avec l'image
+3. **Clic gauche** sur le scotch bleu → marqueur vert ✅
+4. **Clic droit** sur le sol/murs → marqueur rouge ❌
+5. **N** pour prendre une nouvelle photo (change l'angle/lumière)
+6. **Entrée** pour sauvegarder → `pixel_samples.npz`
+
+> [!TIP]
+> Clique sur **20-30 endroits différents** du scotch (bords, centre, zones sombres, zones éclairées) et autant sur le sol. Plus tu varies les conditions, meilleur sera le classifieur.
+
+### Étape 2 — Entraîner le KNN
+
+```bash
+python train_knn.py
+```
+
+Le script affiche automatiquement :
+- Matrice de confusion (TP, FP, FN, TN)
+- Accuracy, Précision, Rappel, F1-score
+- Comparaison avec différentes valeurs de K
+- Images dans le dossier `knn_results/`
+
+> [!IMPORTANT]
+> Vise **Accuracy > 95%** et **F1 > 0.90**. Si c'est en dessous, relance `collect_pixels.py` pour ajouter plus d'échantillons.
+
+### Étape 3 — Tester la détection en live
+
+```bash
+python teleop_client.py --pi-ip <IP_DE_LA_PI>
+```
+
+Appuie sur **P** pour activer la détection. Tu verras :
+- Le badge `[KNN]` en haut à droite (confirme que le modèle est utilisé)
+- Les rectangles verts sur les places détectées
+- Le mini masque en bas à droite (blanc = scotch détecté)
+
