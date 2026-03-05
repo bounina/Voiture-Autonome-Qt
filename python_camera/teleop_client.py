@@ -515,12 +515,11 @@ def main() -> int:
                 continue
             fr = video.get_frame()
             if fr is not None:
-                spots, mask, h_lines, v_lines = detector.detect(fr)
+                spots, mask, rects, _ = detector.detect(fr)
                 with detect_lock:
                     detect_results["spots"] = spots
                     detect_results["mask"] = mask
-                    detect_results["h_lines"] = h_lines
-                    detect_results["v_lines"] = v_lines
+                    detect_results["rects"] = rects
                     detect_results["active"] = True
             time.sleep(1.0)  # ~1 Hz — priorité au contrôle
 
@@ -543,10 +542,9 @@ def main() -> int:
                     with detect_lock:
                         sp = detect_results["spots"]
                         mk = detect_results["mask"]
-                        hl = detect_results["h_lines"]
-                        vl = detect_results["v_lines"]
-                    detector.draw_detections(frame, sp, h_lines=hl,
-                                             v_lines=vl, show_mask=True, mask=mk)
+                        rt = detect_results.get("rects", [])
+                    detector.draw_detections(frame, sp, rects=rt,
+                                             show_mask=True, mask=mk)
                 draw_hud(frame, video.fps, float(s["speed"]), float(s["angle"]),
                          video.connected, bool(s["cmd_ok"]), str(s["tstate"]))
 

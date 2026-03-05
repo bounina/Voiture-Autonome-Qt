@@ -221,114 +221,172 @@ class ParkingDetector:
             return self._get_mask_knn(roi)
         else:
             return self._get_mask_hsv(roi)
+    # ─────────────────────────────────────────────
+    #  CONTOUR-BASED DETECTION (remplace HoughLinesP)
+    # ─────────────────────────────────────────────
 
-    def _detect_lines(self, mask: np.ndarray) -> tuple[list, list]:
-        edges = cv2.Canny(mask, 50, 150)
-        raw = cv2.HoughLinesP(edges, 1, np.pi / 180,
-                              threshold=30,
-                              minLineLength=self.min_line_length,
-                              maxLineGap=self.max_line_gap)
+    def _find_line_contours(self, mask: np.ndarray,
+                            min_area: int = 80,
+                            min_aspect: float = 2.5) -> list[tuple]:
+        """Trouve les contours allongés (bandes de scotch) dans le masque.
 
-        h_lines: list[tuple] = []
-        v_lines: list[tuple] = []
+        Retourne une liste de minAreaRect : ((cx,cy), (w,h), angle)
+        """
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+        rects = []
+        for c in contours:
+            area = cv2.contourArea(c)
+            if area < min_area:
+                continue
 
-        if raw is None:
-            return h_lines, v_lines
+            rect = cv2.minAreaRect(c)  # ((cx,cy), (w,h), angle)
+            w, h = rect[1]
+            if min(w, h) < 1:
+                continue
+            aspect = max(w, h) / min(w, h)
 
-        for line in raw:
-            x1, y1, x2, y2 = line[0]
-            angle = _angle_deg(x1, y1, x2, y2)
+            if aspect >= min_aspect:
+                rects.append(rect)
 
-            if angle < self.angle_thresh:
-                h_lines.append((x1, y1, x2, y2))
-            elif angle > (90 - self.angle_thresh):
-                v_lines.append((x1, y1, x2, y2))
+        return rects
 
-        h_lines = _merge_lines(h_lines, is_vertical=False, gap=self.merge_gap)
-        v_lines = _merge_lines(v_lines, is_vertical=True, gap=self.merge_gap)
+    def _group_into_spots(self, rects: list[tuple],
+                          img_h: int, img_w: int,
+                          max_gap: int = 120,
+                          min_stripe_len: int = 30) -> list[dict]:
+        """Groupe les rectangles proches et ~parallèles en places de parking.
 
-        return h_lines, v_lines
-
-    def _find_spots(self, h_lines: list, v_lines: list,
-                    img_h: int, img_w: int) -> list[dict]:
-        if len(v_lines) < 2:
+        Deux bandes parallèles proches = 1 place.
+        """
+        if len(rects) < 2:
             return []
 
-        v_sorted = sorted(v_lines, key=lambda l: (l[0] + l[2]) / 2)
+        # Normaliser : s'assurer que la "longueur" est le côté le plus long
+        normed = []
+        for (cx, cy), (w, h), angle in rects:
+            if w < h:
+                w, h = h, w
+                angle = angle + 90
+            angle = angle % 180  # normaliser dans [0, 180)
+            length = w
+            if length < min_stripe_len:
+                continue
+            normed.append({"cx": cx, "cy": cy, "w": w, "h": h,
+                           "angle": angle, "length": length,
+                           "rect": ((cx, cy), (w, h), angle)})
+
+        if len(normed) < 2:
+            return []
+
+        # Trier par position perpendiculaire (on utilise cx pour simplifier)
+        normed.sort(key=lambda r: r["cx"])
 
         spots = []
-        for i in range(len(v_sorted) - 1):
-            left = v_sorted[i]
-            right = v_sorted[i + 1]
+        used = set()
 
-            lx = int((left[0] + left[2]) / 2)
-            rx = int((right[0] + right[2]) / 2)
-
-            width = rx - lx
-            if width < 20 or width > img_w * 0.8:
+        for i in range(len(normed)):
+            if i in used:
                 continue
+            for j in range(i + 1, len(normed)):
+                if j in used:
+                    continue
 
-            top_y = min(left[1], left[3], right[1], right[3])
-            bot_y = max(left[1], left[3], right[1], right[3])
-            height = bot_y - top_y
+                ri, rj = normed[i], normed[j]
 
-            if height < 20:
-                continue
+                # Vérifier parallélisme (différence d'angle < 25°)
+                da = abs(ri["angle"] - rj["angle"])
+                if da > 90:
+                    da = 180 - da
+                if da > 25:
+                    continue
 
-            cx = (lx + rx) // 2
-            cy = (top_y + bot_y) // 2
+                # Vérifier proximité (distance entre centres)
+                dist = math.sqrt((ri["cx"] - rj["cx"])**2 +
+                                 (ri["cy"] - rj["cy"])**2)
+                if dist > max_gap or dist < 10:
+                    continue
 
-            spots.append({
-                "id": i + 1,
-                "rect": (lx, top_y, rx, bot_y),
-                "center": (cx, cy),
-                "size": (width, height),
-            })
+                # Calculer le bounding box de la place
+                pts_i = cv2.boxPoints(ri["rect"]).astype(int)
+                pts_j = cv2.boxPoints(rj["rect"]).astype(int)
+                all_pts = np.vstack([pts_i, pts_j])
+
+                x_min = int(np.clip(all_pts[:, 0].min(), 0, img_w))
+                x_max = int(np.clip(all_pts[:, 0].max(), 0, img_w))
+                y_min = int(np.clip(all_pts[:, 1].min(), 0, img_h))
+                y_max = int(np.clip(all_pts[:, 1].max(), 0, img_h))
+
+                width = x_max - x_min
+                height = y_max - y_min
+
+                if width < 15 or height < 15:
+                    continue
+
+                cx = (x_min + x_max) // 2
+                cy = (y_min + y_max) // 2
+
+                spots.append({
+                    "id": len(spots) + 1,
+                    "rect": (x_min, y_min, x_max, y_max),
+                    "center": (cx, cy),
+                    "size": (width, height),
+                    "angle": (ri["angle"] + rj["angle"]) / 2,
+                    "stripes": [pts_i, pts_j],
+                })
+                used.add(i)
+                used.add(j)
+                break  # un stripe ne peut appartenir qu'à 1 place
 
         return spots
 
     def detect(self, frame: np.ndarray) -> tuple[list[dict], np.ndarray,
                                                    list, list]:
-        """Pipeline complet avec ROI (ignore le haut de l'image)."""
+        """Pipeline complet : masque → contours → places."""
         h_full, w_full = frame.shape[:2]
         y_start = int(h_full * self.roi_top_frac)
 
-        # Découper la ROI (bas de l'image = zone proche)
         roi = frame[y_start:, :]
         mask = self._get_blue_mask(roi)
-        h_lines, v_lines = self._detect_lines(mask)
 
-        # Décaler toutes les coordonnées Y vers le frame complet
-        h_lines = [(x1, y1 + y_start, x2, y2 + y_start) for x1, y1, x2, y2 in h_lines]
-        v_lines = [(x1, y1 + y_start, x2, y2 + y_start) for x1, y1, x2, y2 in v_lines]
+        # Trouver les bandes de scotch dans le masque
+        rects = self._find_line_contours(mask)
 
-        spots = self._find_spots(h_lines, v_lines, h_full, w_full)
+        # Décaler Y vers le frame complet
+        rects_shifted = []
+        for (cx, cy), (w, h), angle in rects:
+            rects_shifted.append(((cx, cy + y_start), (w, h), angle))
 
-        # Créer un masque plein frame (haut = noir)
+        roi_h, roi_w = roi.shape[:2]
+        spots = self._group_into_spots(rects_shifted, h_full, w_full)
+
+        # Masque plein frame
         full_mask = np.zeros((h_full, w_full), dtype=np.uint8)
         full_mask[y_start:, :] = mask
 
-        return spots, full_mask, h_lines, v_lines
+        return spots, full_mask, rects_shifted, []
 
     def draw_detections(self, frame: np.ndarray,
                         spots: list[dict],
-                        h_lines: list | None = None,
-                        v_lines: list | None = None,
+                        rects: list | None = None,
+                        _unused: list | None = None,
                         show_mask: bool = False,
                         mask: np.ndarray | None = None) -> None:
         h_f, w_f = frame.shape[:2]
 
-        # Dessiner la limite de la ROI
+        # Limite de la ROI
         roi_y = int(h_f * self.roi_top_frac)
         cv2.line(frame, (0, roi_y), (w_f, roi_y), (100, 100, 100), 1, cv2.LINE_AA)
 
-        if h_lines:
-            for x1, y1, x2, y2 in h_lines:
-                cv2.line(frame, (x1, y1), (x2, y2), (255, 200, 0), 2, cv2.LINE_AA)
-        if v_lines:
-            for x1, y1, x2, y2 in v_lines:
-                cv2.line(frame, (x1, y1), (x2, y2), (0, 200, 255), 2, cv2.LINE_AA)
+        # Dessiner les bandes de scotch détectées (contours)
+        n_stripes = 0
+        if rects:
+            n_stripes = len(rects)
+            for rect in rects:
+                box = cv2.boxPoints(rect).astype(int)
+                cv2.drawContours(frame, [box], 0, (255, 200, 0), 2, cv2.LINE_AA)
 
+        # Dessiner les places
         for spot in spots:
             lx, ty, rx, by = spot["rect"]
             cx, cy = spot["center"]
@@ -354,11 +412,9 @@ class ParkingDetector:
         cv2.putText(frame, f"PLACES: {n} [{self.mode}]", (w_f - 250, 70),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
 
-        # Legend
-        cv2.putText(frame, f"H={len(h_lines or [])}", (10, 70),
+        # Légende
+        cv2.putText(frame, f"Bandes:{n_stripes}", (10, 70),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 200, 0), 1)
-        cv2.putText(frame, f"V={len(v_lines or [])}", (10, 85),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 200, 255), 1)
 
         if show_mask and mask is not None:
             mini_h = h_f // 5
@@ -366,3 +422,4 @@ class ParkingDetector:
             mini_mask = cv2.resize(mask, (mini_w, mini_h))
             mini_bgr = cv2.cvtColor(mini_mask, cv2.COLOR_GRAY2BGR)
             frame[h_f - mini_h:, w_f - mini_w:] = mini_bgr
+
