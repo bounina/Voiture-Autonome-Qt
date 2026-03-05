@@ -50,13 +50,28 @@ def main():
         print("❌ Pas assez de pixels ! Il faut au moins 10 de chaque.")
         return 1
 
+    # ── Sous-échantillonner pour la vitesse ──
+    # KNN calcule la distance à TOUS les points → 300 max suffit largement
+    MAX_PER_CLASS = 150
+    np.random.seed(42)
+    pos_idx = np.where(y == 1)[0]
+    neg_idx = np.where(y == 0)[0]
+    if len(pos_idx) > MAX_PER_CLASS:
+        pos_idx = np.random.choice(pos_idx, MAX_PER_CLASS, replace=False)
+    if len(neg_idx) > MAX_PER_CLASS:
+        neg_idx = np.random.choice(neg_idx, MAX_PER_CLASS, replace=False)
+    keep = np.concatenate([pos_idx, neg_idx])
+    X, y = X[keep], y[keep]
+    n_pos = int(np.sum(y == 1))
+    n_neg = int(np.sum(y == 0))
+    print(f"[KNN] Sous-échantillonné → {n_pos} bleus + {n_neg} sol = {len(X)} pixels")
+
     # ── Normalisation ──
     X_mean = X.mean(axis=0)
     X_std = X.std(axis=0)
-    X_std[X_std == 0] = 1.0  # éviter division par 0
+    X_std[X_std == 0] = 1.0
     X_norm = (X - X_mean) / X_std
 
-    # Sauvegarder les stats de normalisation
     np.savez(SAMPLES_FILE.parent / "knn_norm.npz", mean=X_mean, std=X_std)
 
     # ── Split train/test ──

@@ -522,7 +522,7 @@ def main() -> int:
                     detect_results["h_lines"] = h_lines
                     detect_results["v_lines"] = v_lines
                     detect_results["active"] = True
-            time.sleep(0.5)  # ~2 Hz — garde le CPU libre pour les contrôles
+            time.sleep(1.0)  # ~1 Hz — priorité au contrôle
 
     det_thread = threading.Thread(target=detection_loop, daemon=True)
     det_thread.start()

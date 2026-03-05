@@ -83,11 +83,11 @@ class ParkingDetector:
                  merge_gap: int = 35,
                  knn_k: int = 5,
                  roi_top_frac: float = 0.4,
-                 downsample: int = 2):
+                 downsample: int = 4):
         """
         Args:
             roi_top_frac: fraction du haut de l'image à ignorer (0.4 = ignorer 40% haut)
-            downsample: facteur de réduction pour le KNN (2 = 2× plus petit)
+            downsample: facteur de réduction pour le KNN (4 = 4× plus petit)
         """
         self.angle_thresh = angle_thresh
         self.min_line_length = min_line_length
