@@ -93,11 +93,20 @@ class PixelCollector:
         self.n_neg = 0
         self.radius = DEFAULT_PATCH_RADIUS
 
+        # Historique pour undo : [(label, n_pixels, (x0,y0,x1,y1))]
+        self.history: list[tuple] = []
+
+        # Position souris pour le curseur
+        self.mouse_x = -1
+        self.mouse_y = -1
+
     def on_click(self, event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
             self._collect_patch(x, y, label=1)
         elif event == cv2.EVENT_RBUTTONDOWN:
             self._collect_patch(x, y, label=0)
+        elif event == cv2.EVENT_MOUSEMOVE:
+            self.mouse_x, self.mouse_y = x, y
 
     def _collect_patch(self, cx: int, cy: int, label: int):
         r = self.radius
@@ -106,20 +115,22 @@ class PixelCollector:
         x0 = max(0, cx - r)
         x1 = min(self.w, cx + r + 1)
 
-        # Extraire le patch BGR
         bgr_patch = self.frame[y0:y1, x0:x1]
         features = extract_features(bgr_patch)
+        n_px = len(features)
 
         if label == 1:
             self.positives.append(features)
-            self.n_pos += len(features)
+            self.n_pos += n_px
             color = (0, 255, 0)
             tag = "+"
         else:
             self.negatives.append(features)
-            self.n_neg += len(features)
+            self.n_neg += n_px
             color = (0, 0, 255)
             tag = "-"
+
+        self.history.append((label, n_px, (x0, y0, x1, y1)))
 
         cv2.rectangle(self.display, (x0, y0), (x1, y1), color, 2)
         cv2.putText(self.display, tag, (cx - 5, cy - r - 5),
@@ -130,6 +141,34 @@ class PixelCollector:
         print(f"  [{tag}] ({cx},{cy}) HSV:{hsv_mean} LAB:{lab_mean}"
               f"  |  Total: {self.n_pos} bleus, {self.n_neg} sol")
 
+    def undo(self):
+        """Annule le dernier clic."""
+        if not self.history:
+            print("  [UNDO] Rien à annuler")
+            return
+        label, n_px, _rect = self.history.pop()
+        if label == 1:
+            self.positives.pop()
+            self.n_pos -= n_px
+        else:
+            self.negatives.pop()
+            self.n_neg -= n_px
+        # Redessiner depuis zéro
+        self._redraw()
+        tag = "+bleu" if label == 1 else "-sol"
+        print(f"  [UNDO] {tag} ({n_px}px) annulé → {self.n_pos} bleus, {self.n_neg} sol")
+
+    def _redraw(self):
+        """Redessine tous les marqueurs depuis l'historique."""
+        self.display = self.frame.copy()
+        for label, _n, (x0, y0, x1, y1) in self.history:
+            color = (0, 255, 0) if label == 1 else (0, 0, 255)
+            tag = "+" if label == 1 else "-"
+            cv2.rectangle(self.display, (x0, y0), (x1, y1), color, 2)
+            cx = (x0 + x1) // 2
+            cv2.putText(self.display, tag, (cx - 5, y0 - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
     def update_frame(self, frame: np.ndarray):
         self.frame = frame.copy()
         self.display = frame.copy()
@@ -137,11 +176,20 @@ class PixelCollector:
 
     def get_display(self) -> np.ndarray:
         img = self.display.copy()
-        sz = 2 * self.radius + 1
-        info = f"BLEU(G):{self.n_pos}  SOL(D):{self.n_neg}  Taille:{sz}x{sz} (+/-)  N=frame  ENTREE=sauver"
-        cv2.putText(img, info, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+        r = self.radius
+        sz = 2 * r + 1
+
+        # Curseur : rectangle suivant la souris
+        if self.mouse_x >= 0 and self.mouse_y >= 0:
+            mx, my = self.mouse_x, self.mouse_y
+            cv2.rectangle(img, (mx - r, my - r), (mx + r, my + r),
+                          (255, 255, 0), 1)
+
+        # HUD
+        info = f"BLEU(G):{self.n_pos}  SOL(D):{self.n_neg}  {sz}x{sz}(+/-)  U=undo  N=frame  ENTREE=sauver"
+        cv2.putText(img, info, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
                     (0, 0, 0), 2, cv2.LINE_AA)
-        cv2.putText(img, info, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+        cv2.putText(img, info, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
                     (255, 255, 255), 1, cv2.LINE_AA)
         return img
 
@@ -175,6 +223,7 @@ def main():
     print("=" * 60)
     print("  CLIC GAUCHE  = pixel SCOTCH BLEU (positif)")
     print("  CLIC DROIT   = pixel SOL / MUR (négatif)")
+    print("  U            = UNDO (annuler le dernier clic)")
     print("  N            = capturer un NOUVEAU frame")
     print("  +/-          = agrandir/réduire le curseur")
     print("  ENTRÉE       = sauvegarder et quitter")
@@ -234,6 +283,9 @@ def main():
             collector.radius = max(collector.radius - 1, 0)
             sz = 2 * collector.radius + 1
             print(f"[COLLECT] Curseur → {sz}×{sz}px")
+
+        elif key in (ord('u'), ord('U')):
+            collector.undo()
 
     cv2.destroyAllWindows()
 
