@@ -100,13 +100,34 @@ class PixelCollector:
         self.mouse_x = -1
         self.mouse_y = -1
 
+        # Drag support
+        self._dragging = False
+        self._drag_label = 0
+        self._last_drag_pos = (-100, -100)
+
     def on_click(self, event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
             self._collect_patch(x, y, label=1)
+            self._dragging = True
+            self._drag_label = 1
+            self._last_drag_pos = (x, y)
         elif event == cv2.EVENT_RBUTTONDOWN:
             self._collect_patch(x, y, label=0)
+            self._dragging = True
+            self._drag_label = 0
+            self._last_drag_pos = (x, y)
+        elif event in (cv2.EVENT_LBUTTONUP, cv2.EVENT_RBUTTONUP):
+            self._dragging = False
         elif event == cv2.EVENT_MOUSEMOVE:
             self.mouse_x, self.mouse_y = x, y
+            if self._dragging:
+                # Collecter si assez loin du dernier point
+                dx = x - self._last_drag_pos[0]
+                dy = y - self._last_drag_pos[1]
+                spacing = max(2 * self.radius + 1, 5)
+                if dx * dx + dy * dy >= spacing * spacing:
+                    self._collect_patch(x, y, label=self._drag_label)
+                    self._last_drag_pos = (x, y)
 
     def _collect_patch(self, cx: int, cy: int, label: int):
         r = self.radius
