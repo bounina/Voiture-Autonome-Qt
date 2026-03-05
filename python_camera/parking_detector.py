@@ -88,7 +88,7 @@ class ParkingDetector:
                  max_line_gap: int = 25,
                  merge_gap: int = 35,
                  knn_k: int = 5,
-                 roi_top_frac: float = 0.4,
+                 roi_top_frac: float = 0.2,
                  downsample: int = 4):
         self.angle_thresh = angle_thresh
         self.min_line_length = min_line_length
