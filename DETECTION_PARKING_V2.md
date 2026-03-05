@@ -15,7 +15,7 @@ graph TD
     C -->|3. Modélisation Géométrique| D(Rectangles Inclinés)
     D -->|4. Appariement Spatial| E{Places de Parking}
 
-    style A fill:#f9f,stroke:#333=
+    style A fill:#f9f,stroke:#333
     style E fill:#9f9,stroke:#333
 ```
 
