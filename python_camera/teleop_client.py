@@ -401,7 +401,7 @@ def main() -> int:
 
     # Parking detection
     try:
-        from parking_detector import ParkingDetector
+        from parking_detector_classic import ParkingDetector
         detector = ParkingDetector()
         print("[PARKING] Détecteur initialisé (touche P pour activer)")
     except ImportError:
