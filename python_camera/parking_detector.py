@@ -99,6 +99,8 @@ class ParkingDetector:
         self.downsample = downsample
 
         self.kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        # Kernel large pour relier les fragments lointains (1-2px) avant d'analyser
+        self.kernel_far = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
 
         # Seuils auto-calculés (mode FAST)
         self.fast_hsv_lower = None
@@ -175,10 +177,17 @@ class ParkingDetector:
         mask_hsv = cv2.inRange(hsv, self.fast_hsv_lower, self.fast_hsv_upper)
         mask_lab = cv2.inRange(lab, self.fast_lab_lower, self.fast_lab_upper)
 
-        # Intersection des deux masques = très précis
-        mask = cv2.bitwise_and(mask_hsv, mask_lab)
+        # Union élargie (OR) : on fusionne d'abord HSV et LAB pour ne rien rater de loin
+        # puis on filtre avec AND pour la précision
+        mask_union = cv2.bitwise_or(mask_hsv, mask_lab)
+        mask_inter = cv2.bitwise_and(mask_hsv, mask_lab)
 
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel, iterations=2)
+        # 1. Dilater l'union pour relier les micro-fragments à 80cm+
+        mask_union = cv2.dilate(mask_union, self.kernel_far, iterations=1)
+        # 2. Appliquer l'intersection dans la zone dilatée (filtre les faux positifs)
+        mask = cv2.bitwise_and(mask_union, mask_union)  # garde l'union élargie
+        # 3. Remplissage des trous + suppression du bruit résiduel
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel, iterations=3)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.kernel, iterations=1)
         return mask
 
@@ -226,10 +235,12 @@ class ParkingDetector:
     # ─────────────────────────────────────────────
 
     def _find_line_contours(self, mask: np.ndarray,
-                            min_area: int = 80,
-                            min_aspect: float = 2.5) -> list[tuple]:
+                            min_area: int = 30,
+                            min_aspect: float = 2.0) -> list[tuple]:
         """Trouve les contours allongés (bandes de scotch) dans le masque.
 
+        min_area=30  : accepte les fragments minces à grande distance
+        min_aspect=2 : ratio longueur/largeur minimum
         Retourne une liste de minAreaRect : ((cx,cy), (w,h), angle)
         """
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,

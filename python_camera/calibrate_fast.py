@@ -139,6 +139,7 @@ def main():
     print("=" * 55)
 
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    kernel_far = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
 
     while True:
         frame = stream.get()
@@ -171,9 +172,12 @@ def main():
         mask_lab = cv2.inRange(lab,
             np.array([l_min, a_min, b_min]),
             np.array([l_max, a_max, b_max]))
-        mask = cv2.bitwise_and(mask_hsv, mask_lab)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        # Idem que parking_detector : OR union + pre-dilation pour les fragments lointains
+        mask_union = cv2.bitwise_or(mask_hsv, mask_lab)
+        mask_union = cv2.dilate(mask_union, kernel_far, iterations=1)
+        mask = mask_union
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=3)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
 
         # Trouver les contours allongés
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -181,14 +185,14 @@ def main():
         n_stripes = 0
         for c in contours:
             area = cv2.contourArea(c)
-            if area < 80:
+            if area < 30:  # identique au detecteur
                 continue
             rect = cv2.minAreaRect(c)
             w, h = rect[1]
             if min(w, h) < 1:
                 continue
             aspect = max(w, h) / min(w, h)
-            if aspect >= 2.5:
+            if aspect >= 2.0:  # identique au detecteur
                 box = cv2.boxPoints(rect).astype(int)
                 cv2.drawContours(display, [box], 0, (0, 200, 255), 2)
                 n_stripes += 1
