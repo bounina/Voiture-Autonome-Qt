@@ -44,7 +44,7 @@ def main():
     print(f"[KNN] Dataset : {n_pos} bleus + {n_neg} sol = {len(X)} pixels ({n_features}D)")
 
     if n_features == 3:
-        print("⚠ Ancien format 3D (HSV seul). Relance collect_pixels.py pour le nouveau format 6D (HSV+LAB).")
+        print("[WARNING] Ancien format 3D (HSV seul). Relance collect_pixels.py pour le nouveau format 6D (HSV+LAB).")
         return 1
 
     if n_pos < 10 or n_neg < 10:
@@ -121,7 +121,7 @@ def main():
 
     # ── Sauvegarder ──
     knn.save(str(MODEL_FILE))
-    print(f"\n✅ Modèle KNN sauvegardé : {MODEL_FILE}")
+    print(f"\n[OK] Modèle KNN sauvegardé : {MODEL_FILE}")
 
     # ── Calculer les seuils automatiques (FAST mode) ──
     # Comme les classes sont parfaitement séparables, on peut utiliser
@@ -145,7 +145,7 @@ def main():
     thresholds_file = SAMPLES_FILE.parent / "knn_thresholds.json"
     with open(thresholds_file, "w") as f:
         json.dump(thresholds, f, indent=2)
-    print(f"✅ Seuils sauvegardés : {thresholds_file}")
+    print(f"[OK] Seuils sauvegardés : {thresholds_file}")
     print(f"   → parking_detector.py utilisera inRange() à pleine résolution (FAST)")
 
     # ── Résultats visuels ──

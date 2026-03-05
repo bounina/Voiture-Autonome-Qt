@@ -192,8 +192,9 @@ class PixelCollector:
 
     def update_frame(self, frame: np.ndarray):
         self.frame = frame.copy()
-        self.display = frame.copy()
         self.h, self.w = frame.shape[:2]
+        # Redessiner l'historique sur le nouveau frame (évite les fantômes)
+        self._redraw()
 
     def get_display(self) -> np.ndarray:
         img = self.display.copy()

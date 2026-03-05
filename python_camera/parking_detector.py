@@ -130,12 +130,12 @@ class ParkingDetector:
                 self.fast_lab_lower = np.array([t["L_min"], t["a_min"], t["b_min"]], dtype=np.uint8)
                 self.fast_lab_upper = np.array([t["L_max"], t["a_max"], t["b_max"]], dtype=np.uint8)
                 self.mode = self.MODE_FAST
-                print(f"[PARKING] ✅ Mode FAST — seuils auto-calculés (pleine résolution)")
+                print(f"[PARKING] [OK] Mode FAST — seuils auto-calculés (pleine résolution)")
                 print(f"[PARKING]    HSV: {self.fast_hsv_lower} → {self.fast_hsv_upper}")
                 print(f"[PARKING]    LAB: {self.fast_lab_lower} → {self.fast_lab_upper}")
                 return
             except Exception as e:
-                print(f"[PARKING] ⚠ Erreur chargement seuils : {e}")
+                print(f"[PARKING] [WARNING] Erreur chargement seuils : {e}")
 
         # 2. Mode KNN — classifieur
         if KNN_MODEL_FILE.exists():
@@ -146,10 +146,10 @@ class ParkingDetector:
                     self.norm_mean = norm["mean"].astype(np.float32)
                     self.norm_std = norm["std"].astype(np.float32)
                 self.mode = self.MODE_KNN
-                print(f"[PARKING] ✅ Mode KNN (downsample {self.downsample}×)")
+                print(f"[PARKING] [OK] Mode KNN (downsample {self.downsample}×)")
                 return
             except Exception as e:
-                print(f"[PARKING] ⚠ Erreur chargement KNN : {e}")
+                print(f"[PARKING] [WARNING] Erreur chargement KNN : {e}")
 
         # 3. Mode HSV — fallback
         print(f"[PARKING] Mode HSV (seuils manuels)")
