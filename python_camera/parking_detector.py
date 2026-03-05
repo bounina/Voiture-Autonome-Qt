@@ -24,6 +24,7 @@ import numpy as np
 HSV_CONFIG_FILE = Path(__file__).parent / "hsv_config.json"
 KNN_MODEL_FILE = Path(__file__).parent / "knn_model.xml"
 KNN_NORM_FILE = Path(__file__).parent / "knn_norm.npz"
+KNN_THRESHOLDS_FILE = Path(__file__).parent / "knn_thresholds.json"
 
 _DEFAULT_HSV = {
     "h_min": 90, "s_min": 50, "v_min": 50,
@@ -76,6 +77,11 @@ def _merge_lines(lines: list[tuple], is_vertical: bool,
 class ParkingDetector:
     """Détecte les places de parking tracées au scotch bleu (pattern peigne)."""
 
+    # Modes de détection : FAST > KNN > HSV
+    MODE_FAST = "FAST"  # seuils auto-calculés, pleine résolution
+    MODE_KNN = "KNN"    # classifieur KNN, downsamplé
+    MODE_HSV = "HSV"    # seuils manuels, fallback
+
     def __init__(self,
                  angle_thresh: float = 25.0,
                  min_line_length: int = 40,
@@ -84,11 +90,6 @@ class ParkingDetector:
                  knn_k: int = 5,
                  roi_top_frac: float = 0.4,
                  downsample: int = 4):
-        """
-        Args:
-            roi_top_frac: fraction du haut de l'image à ignorer (0.4 = ignorer 40% haut)
-            downsample: facteur de réduction pour le KNN (4 = 4× plus petit)
-        """
         self.angle_thresh = angle_thresh
         self.min_line_length = min_line_length
         self.max_line_gap = max_line_gap
@@ -99,40 +100,59 @@ class ParkingDetector:
 
         self.kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
 
-        # Normalisation (chargée depuis knn_norm.npz)
+        # Seuils auto-calculés (mode FAST)
+        self.fast_hsv_lower = None
+        self.fast_hsv_upper = None
+        self.fast_lab_lower = None
+        self.fast_lab_upper = None
+
+        # KNN
+        self.knn = None
         self.norm_mean = None
         self.norm_std = None
 
-        # Charger le KNN ou fallback sur seuils HSV
-        self.knn = None
-        self.use_knn = False
-        self._load_knn()
+        # Mode actif
+        self.mode = self.MODE_HSV
+        self._load_models()
 
-        if not self.use_knn:
+        if self.mode == self.MODE_HSV:
             self.hsv_lower, self.hsv_upper = self._load_hsv()
 
-    def _load_knn(self):
-        """Charge le modèle KNN et les stats de normalisation."""
+    def _load_models(self):
+        """Charge les modèles par priorité : FAST > KNN > HSV."""
+        # 1. Mode FAST — seuils auto-calculés
+        if KNN_THRESHOLDS_FILE.exists():
+            try:
+                with open(KNN_THRESHOLDS_FILE) as f:
+                    t = json.load(f)
+                self.fast_hsv_lower = np.array([t["H_min"], t["S_min"], t["V_min"]], dtype=np.uint8)
+                self.fast_hsv_upper = np.array([t["H_max"], t["S_max"], t["V_max"]], dtype=np.uint8)
+                self.fast_lab_lower = np.array([t["L_min"], t["a_min"], t["b_min"]], dtype=np.uint8)
+                self.fast_lab_upper = np.array([t["L_max"], t["a_max"], t["b_max"]], dtype=np.uint8)
+                self.mode = self.MODE_FAST
+                print(f"[PARKING] ✅ Mode FAST — seuils auto-calculés (pleine résolution)")
+                print(f"[PARKING]    HSV: {self.fast_hsv_lower} → {self.fast_hsv_upper}")
+                print(f"[PARKING]    LAB: {self.fast_lab_lower} → {self.fast_lab_upper}")
+                return
+            except Exception as e:
+                print(f"[PARKING] ⚠ Erreur chargement seuils : {e}")
+
+        # 2. Mode KNN — classifieur
         if KNN_MODEL_FILE.exists():
             try:
                 self.knn = cv2.ml.KNearest_load(str(KNN_MODEL_FILE))
-                self.use_knn = True
-                print(f"[PARKING] ✅ Modèle KNN chargé : {KNN_MODEL_FILE}")
-
-                # Charger la normalisation
                 if KNN_NORM_FILE.exists():
                     norm = np.load(KNN_NORM_FILE)
                     self.norm_mean = norm["mean"].astype(np.float32)
                     self.norm_std = norm["std"].astype(np.float32)
-                    print(f"[PARKING]    → 6D HSV+LAB normalisé (K={self.knn_k})")
-                else:
-                    print(f"[PARKING]    ⚠ Pas de knn_norm.npz — prédiction non normalisée")
+                self.mode = self.MODE_KNN
+                print(f"[PARKING] ✅ Mode KNN (downsample {self.downsample}×)")
+                return
             except Exception as e:
                 print(f"[PARKING] ⚠ Erreur chargement KNN : {e}")
-                self.use_knn = False
-        else:
-            print(f"[PARKING] Pas de modèle KNN ({KNN_MODEL_FILE})")
-            print(f"[PARKING]    → Fallback sur seuils HSV manuels")
+
+        # 3. Mode HSV — fallback
+        print(f"[PARKING] Mode HSV (seuils manuels)")
 
     def _load_hsv(self) -> tuple[np.ndarray, np.ndarray]:
         cfg = _DEFAULT_HSV.copy()
@@ -143,47 +163,50 @@ class ParkingDetector:
                 cfg.update(loaded)
             except Exception:
                 pass
-
         lower = np.array([cfg["h_min"], cfg["s_min"], cfg["v_min"]])
         upper = np.array([cfg["h_max"], cfg["s_max"], cfg["v_max"]])
         return lower, upper
 
+    def _get_mask_fast(self, roi: np.ndarray) -> np.ndarray:
+        """Masque via seuils auto-calculés — PLEINE RÉSOLUTION, ultra rapide."""
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+
+        mask_hsv = cv2.inRange(hsv, self.fast_hsv_lower, self.fast_hsv_upper)
+        mask_lab = cv2.inRange(lab, self.fast_lab_lower, self.fast_lab_upper)
+
+        # Intersection des deux masques = très précis
+        mask = cv2.bitwise_and(mask_hsv, mask_lab)
+
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel, iterations=2)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.kernel, iterations=1)
+        return mask
+
     def _get_mask_knn(self, roi: np.ndarray) -> np.ndarray:
-        """Masque binaire via KNN 6D (HSV+LAB) avec downsampling."""
+        """Masque via KNN 6D (HSV+LAB) avec downsampling."""
         h, w = roi.shape[:2]
         ds = self.downsample
-
-        # Réduire la résolution
         small = cv2.resize(roi, (w // ds, h // ds), interpolation=cv2.INTER_AREA)
         sh, sw = small.shape[:2]
 
-        # Extraire les 6 features : H, S, V, L, a, b
         hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
         lab = cv2.cvtColor(small, cv2.COLOR_BGR2LAB)
-        pixels = np.hstack([
-            hsv.reshape(-1, 3),
-            lab.reshape(-1, 3),
-        ]).astype(np.float32)
+        pixels = np.hstack([hsv.reshape(-1, 3), lab.reshape(-1, 3)]).astype(np.float32)
 
-        # Normaliser si les stats sont disponibles
         if self.norm_mean is not None and self.norm_std is not None:
             pixels = (pixels - self.norm_mean) / self.norm_std
 
-        # Prédiction KNN
         _, results, _, _ = self.knn.findNearest(pixels, self.knn_k)
         small_mask = (results.flatten() == 1).astype(np.uint8) * 255
         small_mask = small_mask.reshape(sh, sw)
 
-        # Remonter à la taille originale
         mask = cv2.resize(small_mask, (w, h), interpolation=cv2.INTER_NEAREST)
-
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel, iterations=2)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.kernel, iterations=1)
-
         return mask
 
     def _get_mask_hsv(self, roi: np.ndarray) -> np.ndarray:
-        """Masque binaire via seuils HSV (fallback)."""
+        """Masque via seuils HSV manuels (fallback)."""
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, self.hsv_lower, self.hsv_upper)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel, iterations=2)
@@ -191,8 +214,10 @@ class ParkingDetector:
         return mask
 
     def _get_blue_mask(self, roi: np.ndarray) -> np.ndarray:
-        """Masque binaire — KNN si disponible, sinon seuils HSV."""
-        if self.use_knn:
+        """Masque binaire — FAST > KNN > HSV."""
+        if self.mode == self.MODE_FAST:
+            return self._get_mask_fast(roi)
+        elif self.mode == self.MODE_KNN:
             return self._get_mask_knn(roi)
         else:
             return self._get_mask_hsv(roi)
@@ -324,10 +349,9 @@ class ParkingDetector:
 
         n = len(spots)
         color = (0, 255, 0) if n > 0 else (0, 0, 255)
-        mode = "KNN" if self.use_knn else "HSV"
-        cv2.putText(frame, f"PLACES: {n} [{mode}]", (w_f - 220, 70),
+        cv2.putText(frame, f"PLACES: {n} [{self.mode}]", (w_f - 250, 70),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(frame, f"PLACES: {n} [{mode}]", (w_f - 220, 70),
+        cv2.putText(frame, f"PLACES: {n} [{self.mode}]", (w_f - 250, 70),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
 
         # Legend

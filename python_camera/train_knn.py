@@ -13,6 +13,7 @@ Usage :
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import cv2
@@ -120,7 +121,32 @@ def main():
 
     # ── Sauvegarder ──
     knn.save(str(MODEL_FILE))
-    print(f"\n✅ Modèle sauvegardé : {MODEL_FILE}")
+    print(f"\n✅ Modèle KNN sauvegardé : {MODEL_FILE}")
+
+    # ── Calculer les seuils automatiques (FAST mode) ──
+    # Comme les classes sont parfaitement séparables, on peut utiliser
+    # cv2.inRange() à pleine résolution au lieu du KNN (1000× plus rapide)
+    pos_data = data["X"][data["y"] == 1].astype(np.float32)  # données NON sous-échantillonnées
+    # Colonnes: H,S,V,L,a,b
+    channel_names = ["H", "S", "V", "L", "a", "b"]
+    thresholds = {}
+    print(f"\n[FAST] Seuils automatiques calculés à partir de {len(pos_data)} pixels bleus :")
+    for i, name in enumerate(channel_names):
+        vals = pos_data[:, i]
+        mean = float(np.mean(vals))
+        std = float(np.std(vals))
+        # Utiliser mean ± 2.5*std pour capturer 98.8% des pixels bleus
+        lo = max(0, mean - 2.5 * std)
+        hi = min(255, mean + 2.5 * std)
+        thresholds[f"{name}_min"] = round(lo)
+        thresholds[f"{name}_max"] = round(hi)
+        print(f"   {name}: {lo:.0f} - {hi:.0f}  (mean={mean:.1f} std={std:.1f})")
+
+    thresholds_file = SAMPLES_FILE.parent / "knn_thresholds.json"
+    with open(thresholds_file, "w") as f:
+        json.dump(thresholds, f, indent=2)
+    print(f"✅ Seuils sauvegardés : {thresholds_file}")
+    print(f"   → parking_detector.py utilisera inRange() à pleine résolution (FAST)")
 
     # ── Résultats visuels ──
     RESULTS_DIR.mkdir(exist_ok=True)
