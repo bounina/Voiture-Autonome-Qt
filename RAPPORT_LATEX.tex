@@ -1,0 +1,107 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{float}
+\usepackage{amsmath}
+\usepackage{tikz}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\geometry{a4paper, margin=2.5cm}
+
+\title{\textbf{Rapport de Projet : Voiture Autonome et Détection Intelligente de Stationnement}}
+\author{Équipe Projet ADAS}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Ce rapport détaille la conception, l'architecture et l'implémentation d'un système d'aide à la conduite (ADAS) pour un véhicule miniature (Voiture RC). Le projet se concentre particulièrement sur la détection en temps réel de places de stationnement via flux vidéo. Nous présentons l'évolution de notre algorithmique, d'une méthode classique par traitement d'images (Opérations morphologiques et KNN) vers une approche moderne et robuste par apprentissage profond (Deep Learning - YOLOv8 Instance Segmentation). Enfin, nous décrivons l'interface homme-machine (HUD) développée pour téléopérer le véhicule.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Introduction et Problématique}
+Le développement de véhicules autonomes repose fortement sur la perception de l'environnement immédiat. L'un des défis majeurs pour les systèmes d'aide au stationnement est de détecter avec précision les emplacements disponibles, quelles que soient les conditions de luminosité, la texture du sol ou les occlusions. 
+Le but de ce projet est d'embarquer une caméra sur un châssis télécommandé (contrôlé par un Raspberry Pi) et de traiter ce flux vidéo sur un poste distant puissant afin de piloter la voiture et d'afficher une modélisation dynamique de la trajectoire sur un ordinateur ou un terminal déporté.
+
+\section{Architecture Globale du Système}
+
+\subsection{Matériel Engagé}
+Le système repose sur une architecture distribuée Client-Serveur :
+\begin{itemize}
+    \item \textbf{Le Véhicule (Serveur)} : Un Raspberry Pi embarqué sur un châssis RC. Il est connecté à une caméra frontale/arrière, et pilote un contrôleur de vitesse (ESC) pour le moteur DC ainsi qu'un servomoteur pour la direction (via des signaux PWM GPIO).
+    \item \textbf{Le Poste de Contrôle (Client)} : Un ordinateur sous Windows, équipé pour décompresser le flux vidéo, appliquer des inférences réseaux de neurones (GPU) et renvoyer les consignes de conduite via le protocole TCP/IP.
+\end{itemize}
+
+\subsection{Flux de Communication Réseau}
+La communication s'effectue intégralement en Wi-Fi. Le Raspberry Pi capture les trames vidéo, les encode en JPEG et les transmet sur le \textbf{port TCP 8885}. En parallèle, il écoute sur le \textbf{port TCP 8884} les chaînes de caractères contenant les commandes de pilotage (ex: \texttt{TELEOP:DRIVE,0.1,-0.5}).
+
+% Exemple de figure à insérer sur Overleaf :
+% \begin{figure}[H]
+%     \centering
+%     \includegraphics[width=0.8\textwidth]{images/architecture.png}
+%     \caption{Schéma de l'architecture réseau Client-Serveur}
+%     \label{fig:architecture}
+% \end{figure}
+
+\section{Phase 1 : L'Approche Classique (Vision par Ordinateur et KNN)}
+Au démarrage du projet, le système de détection reposait sur des règles algorithmiques heuristiques strictes (Filtres OpenCV).
+
+\subsection{Traitement d'Image et Filtrage Géométrique}
+La première étape consiste à appliquer un masque colorimétrique (Espace HSV) pour isoler le ruban adhésif bleu qui délimite notre maquette de parking. Des opérations morphologiques (Fermeture) éliminent le bruit, permettant à la fonction \texttt{cv2.findContours} de trouver les quadrilatères.
+Seules les formes respectant une certaine surface et une convexité stricte sont conservées.
+
+\subsection{Classification par K-Nearest Neighbors (KNN)}
+Malgré ce filtrage, des éléments parasites (ombres, pieds de table) pouvaient être détectés. Nous avons compilé un modèle de Machine Learning KNN, entraîné manuellement. Pour chaque boîte suspecte, l'algorithme extrait 12 \textit{features} mathématiques (Moments de Hu, Compacité, Ratio L/l) et donne une probabilité discrète d'être une véritable place de stationnement.
+
+\textit{Limites :} Cette méthode classique est très sensible aux variations de lumière. Le seuillage HSV nécessite une calibration constante.
+
+\section{Phase 2 : L'Approche Moderne (Deep Learning via YOLOv8)}
+Afin d'apporter une robustesse de niveau industriel à la détection, nous avons migré vers une architecture de Deep Learning utilisant la segmentation d'instance.
+
+\subsection{Segmentation d'Instance avec YOLOv8-seg}
+Contrairement à la détection d'objets classique qui renvoie des boîtes englobantes (Bounding Boxes rectangulaires), la \textit{Segmentation d'Instance} (\texttt{yolov8n-seg.pt}) prédit le masque exact de l'objet au pixel près, ce qui permet de détourer parfaitement une place de parking biaisée par la perspective de la caméra.
+
+\subsection{Constitution du Dataset et Entraînement}
+\begin{enumerate}
+    \item \textbf{Acquisition} : Un script a été utilisé pour capturer des images du circuit en conduisant la voiture sous divers angles, créant un jeu de données "Maison".
+    \item \textbf{Annotation} : Les images ont été annotées manuellement sous \textit{Roboflow} à l'aide de masques polygonaux, incluant des places partiellement coupées par l'objectif.
+    \item \textbf{Transfer Learning} : Le modèle a été ré-entraîné localement sur la machine cliente sur $50$ époques, permettant au réseau d'apprendre spécifiquement les caractéristiques visuelles d'une place de stationnement de notre maquette, sans se soucier de la couleur exacte.
+\end{enumerate}
+
+Le modèle final (\texttt{best.pt}) est capable de détecter simultanément plusieurs places avec des indices de confiance très élevés ($>95\%$), y compris lorsque l'éclairage de la salle change (lumière artificielle vs naturelle).
+
+\section{Interface Homme-Machine (HUD) et Rendu Visuel}
+
+Le poste de pilotage intègre un \textit{Heads-Up Display} (HUD) inspiré des caméras de recul des véhicules modernes.
+
+\subsection{Calibration et Projection de Perspective}
+Pour dessiner au sol de manière réaliste, un script de calibration (\texttt{calibrate\_overlay.py}) permet de cliquer sur 4 points du sol afin de définir un plan de perspective. 
+Ce trapèze virtuel est divisé en trois zones de profondeur (proche, moyen, lointain) rendues de manières asymétriques avec un très faible niveau d'opacité (effet verre / anti-aliasing) donnant un rendu dit "Premium". La base du trapèze est marquée d'une ligne rouge épaisse (Ligne pare-chocs critique).
+
+\subsection{Affichage Dynamique de la Trajectoire}
+L'angle de braquage des roues commandé par l'utilisateur (entre -35° et +35°) modifie instantanément des lignes de trajectoire oranges (Courbes déportées quadratiquement) sur l’écran. 
+Le facteur de courbure a été empiriquement mesuré et réglé à \texttt{130.0} dans le script final (\texttt{teleop\_client.py}), permettant au pilote de visualiser parfaitement où les pneus vont toucher le sol sur l'écran.
+
+% Exemple d'inclusion d'image
+% \begin{figure}[H]
+%     \centering
+%     \includegraphics[width=1.0\textwidth]{images/hud.png}
+%     \caption{Interface de pilotage dynamique avec HUD et détection YOLO active}
+%     \label{fig:hud}
+% \end{figure}
+
+\section{Conclusion}
+Au travers de ce projet distribué, nous avons réussi à synchroniser une télémétrie asynchrone entre un composant Linux restreint et un hyperviseur IA Windows. 
+Le passage d'une méthode de Computer Vision manuelle (HSV + KNN) à une approche d'Intelligence Artificielle de pointe (Segmentation d'Instance YOLO) démontre l'immense puissance et l'inévitabilité du Deep Learning dans le paradigme de la conduite autonome moderne. Les performances obtenues permettent au véhicule de cartographier son environnement avec une fiabilité et une fluidité optimales.
+
+\end{document}

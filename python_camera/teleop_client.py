@@ -34,6 +34,7 @@ _VK = {
     'z': 0x5A, 's': 0x53, 'q': 0x51, 'd': 0x44,
     'space': 0x20, 'esc': 0x1B,
     't': 0x54, 'r': 0x52, 'o': 0x4F, 'p': 0x50,
+    'u': 0x55, 'i': 0x49,
 }
 
 def is_key(name: str) -> bool:
@@ -191,7 +192,8 @@ def send_command(sock: socket.socket | None, cmd: str) -> bool:
 # ═══════════════════════ DRAWING ══════════════════════════════════════════
 
 def draw_hud(frame: np.ndarray, fps: float, speed: float, angle: float,
-             video_ok: bool, cmd_ok: bool, throttle_state: str) -> None:
+             video_ok: bool, cmd_ok: bool, throttle_state: str,
+             curvature: float = 130.0) -> None:
     h, w = frame.shape[:2]
 
     # Dark gradient/transparent bar at top
@@ -226,13 +228,18 @@ def draw_hud(frame: np.ndarray, fps: float, speed: float, angle: float,
     needle_x = int(bar_cx + angle * bar_hw)
     cv2.circle(frame, (needle_x, bar_y), 7, (0, 200, 255), -1, cv2.LINE_AA)
 
+    # Info texte pour la calibration
+    cv2.putText(frame, f"ANGLE: {angle:.2f}  |  CURVE (U/I): {curvature:.0f}",
+                (bar_cx - 200, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
+
     cv2.putText(frame, "Z:Fwd S:Bwd Q:L D:R ESP:Stop O:Overlay ESC:Quit",
                 (10, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (180, 180, 180), 1, cv2.LINE_AA)
 
 
 def draw_parking_overlay(frame: np.ndarray, steering: float,
                          car_half_cm: float, calib: list | None,
-                         overlay_cfg: dict | None = None) -> None:
+                         overlay_cfg: dict | None = None,
+                         curvature_factor: float = 130.0) -> None:
     """Overlay premium style OEM Audi/VW.
     Utilise overlay_calib.json (4 coins) si disponible, sinon défauts."""
     h, w = frame.shape[:2]
@@ -246,43 +253,46 @@ def draw_parking_overlay(frame: np.ndarray, steering: float,
     bl_x, bl_y = int(cfg["bottom_left"][0] * w),  int(cfg["bottom_left"][1] * h)
     br_x, br_y = int(cfg["bottom_right"][0] * w), int(cfg["bottom_right"][1] * h)
 
-    # On divise le trapèze en 3 zones horizontales (bas=proche, haut=loin)
-    # t=0 → bottom, t=1 → top
-    def row(t: float):
-        """Retourne (x_left, x_right, y) pour une fraction t du trapèze."""
-        lx = int(bl_x + t * (tl_x - bl_x))
-        rx = int(br_x + t * (tr_x - br_x))
-        ly = int(bl_y + t * (tl_y - bl_y))
-        return lx, rx, ly
+    # On divise le trapèze en 3 zones (bas=proche, haut=loin)
+    # L'interpolation se fait point par point sur les segments gauche et droit
+    def get_pt(p_bottom, p_top, t):
+        """t=0: bottom, t=1: top"""
+        return (int(p_bottom[0] + t * (p_top[0] - p_bottom[0])),
+                int(p_bottom[1] + t * (p_top[1] - p_bottom[1])))
+
+    bl = (bl_x, bl_y)
+    br = (br_x, br_y)
+    tl = (tl_x, tl_y)
+    tr = (tr_x, tr_y)
 
     overlay = frame.copy()
 
-    # 1. Zones colorées (3 bandes horizontales dans le trapèze)
-    # Zone 1 : 0% → 33% (proche, bleu clair)
-    lx0, rx0, y0 = row(0.0)
-    lx1, rx1, y1 = row(0.33)
-    poly_z1 = np.array([[lx0, y0], [rx0, y0], [rx1, y1], [lx1, y1]], np.int32)
+    # 1. Zones colorées (3 bandes dans le trapèze)
+    # Zone 1 : 0% → 33%  (t de 0.0 à 0.33)
+    l0, r0 = get_pt(bl, tl, 0.0), get_pt(br, tr, 0.0)
+    l1, r1 = get_pt(bl, tl, 0.33), get_pt(br, tr, 0.33)
+    poly_z1 = np.array([l0, r0, r1, l1], np.int32)
     cv2.fillPoly(overlay, [poly_z1], (220, 60, 60))
 
-    # Zone 2 : 33% → 66% (moyen, bleu moyen)
-    lx2, rx2, y2 = row(0.66)
-    poly_z2 = np.array([[lx1, y1], [rx1, y1], [rx2, y2], [lx2, y2]], np.int32)
+    # Zone 2 : 33% → 66% 
+    l2, r2 = get_pt(bl, tl, 0.66), get_pt(br, tr, 0.66)
+    poly_z2 = np.array([l1, r1, r2, l2], np.int32)
     cv2.fillPoly(overlay, [poly_z2], (180, 50, 50))
 
-    # Zone 3 : 66% → 100% (loin, bleu foncé)
-    lx3, rx3, y3 = row(1.0)
-    poly_z3 = np.array([[lx2, y2], [rx2, y2], [rx3, y3], [lx3, y3]], np.int32)
+    # Zone 3 : 66% → 100%
+    l3, r3 = get_pt(bl, tl, 1.0), get_pt(br, tr, 1.0)
+    poly_z3 = np.array([l2, r2, r3, l3], np.int32)
     cv2.fillPoly(overlay, [poly_z3], (140, 40, 40))
 
     cv2.addWeighted(overlay, 0.4, frame, 0.6, 0, frame)
 
-    # 2. Ligne critique pare-chocs (Rouge épais, en bas du trapèze)
-    cv2.line(frame, (lx0, y0), (rx0, y0), (0, 0, 255), 4, cv2.LINE_AA)
+    # 2. Ligne critique pare-chocs (Rouge épais, en bas)
+    cv2.line(frame, l0, r0, (0, 0, 255), 4, cv2.LINE_AA)
 
-    # 3. Lignes de séparation noires entre les 3 zones
-    cv2.line(frame, (lx1, y1), (rx1, y1), (0, 0, 0), 1, cv2.LINE_AA)
-    cv2.line(frame, (lx2, y2), (rx2, y2), (0, 0, 0), 1, cv2.LINE_AA)
-    cv2.line(frame, (lx3, y3), (rx3, y3), (0, 0, 0), 1, cv2.LINE_AA)
+    # 3. Lignes de séparation noires
+    cv2.line(frame, l1, r1, (0, 0, 0), 1, cv2.LINE_AA)
+    cv2.line(frame, l2, r2, (0, 0, 0), 1, cv2.LINE_AA)
+    cv2.line(frame, l3, r3, (0, 0, 0), 1, cv2.LINE_AA)
 
     # 4. Courbes de trajectoire dynamiques (Orange)
     # Inversion du signe : caméra arrière → D (steer>0) donne courbe à gauche
@@ -291,17 +301,16 @@ def draw_parking_overlay(frame: np.ndarray, steering: float,
     l_dyn = np.empty((n, 2), dtype=np.int32)
     r_dyn = np.empty((n, 2), dtype=np.int32)
 
-    curvature_factor = 150.0  # Adapté à ±40° de braquage réel
-
     for i in range(n):
         t = i / (n - 1)  # 0 = bas, 1 = haut
-        lx, rx, y = row(t)
+        l_pt = get_pt(bl, tl, t)
+        r_pt = get_pt(br, tr, t)
 
         # Décalage latéral dû au braquage (quadratique, doux)
         lat_off = int(steer * (t ** 2) * curvature_factor)
 
-        l_dyn[i] = (lx + lat_off, y)
-        r_dyn[i] = (rx + lat_off, y)
+        l_dyn[i] = (l_pt[0] + lat_off, l_pt[1])
+        r_dyn[i] = (r_pt[0] + lat_off, r_pt[1])
 
     dyn_color = (0, 165, 255)  # Orange (BGR)
     cv2.polylines(frame, [l_dyn], False, dyn_color, 3, cv2.LINE_AA)
@@ -401,12 +410,18 @@ def main() -> int:
 
     # Parking detection
     try:
-        from parking_detector_classic import ParkingDetector
+        from parking_detector_yolo import ParkingDetectorYOLO as ParkingDetector
         detector = ParkingDetector()
-        print("[PARKING] Détecteur initialisé (touche P pour activer)")
-    except ImportError:
-        detector = None
-        print("[PARKING] parking_detector.py introuvable — détection désactivée")
+        print("[PARKING] Détecteur YOLO initialisé (touche P pour activer)")
+    except ImportError as e:
+        print(f"[PARKING] YOLO non disponible ({e}), tentative module classique...")
+        try:
+            from parking_detector_classic import ParkingDetector
+            detector = ParkingDetector()
+            print("[PARKING] Détecteur CLASSIC initialisé (touche P)")
+        except ImportError:
+            detector = None
+            print("[PARKING] Détection désactivée")
 
     detect_lock = threading.Lock()
     detect_results: dict = {"spots": [], "mask": None, "h_lines": [], "v_lines": [], "active": False}
@@ -422,6 +437,7 @@ def main() -> int:
     def control_loop():
         nonlocal cmd_sock, cmd_ok
         speed = angle = 0.0
+        curvature = 130.0
         show_overlay = args.overlay
         show_parking = False
         test_angles = [-1.0, -0.5, 0.0, 0.5, 1.0]
@@ -473,6 +489,11 @@ def main() -> int:
                 if p_now and not p_prev:
                     show_parking = not show_parking
                 p_prev = p_now
+                
+                if is_key('u'):
+                    curvature = max(0.0, curvature - 5.0)
+                if is_key('i'):
+                    curvature += 5.0
 
             if not throttle_active:
                 speed *= DECEL_FACTOR
@@ -483,7 +504,7 @@ def main() -> int:
 
             with state_lock:
                 state.update(speed=speed, angle=angle, tstate=tstate, show_parking=show_parking,
-                             show_overlay=show_overlay)
+                             show_overlay=show_overlay, curvature=curvature)
 
             now = time.perf_counter()
             if now - last_cmd_time >= 0.05:
@@ -537,7 +558,8 @@ def main() -> int:
                     s = state.copy()
                 if s["show_overlay"]:
                     draw_parking_overlay(frame, float(s["angle"]),
-                                         car_half_cm, calib, overlay_cfg)
+                                         car_half_cm, calib, overlay_cfg,
+                                         float(s.get("curvature", 130.0)))
                 if s.get("show_parking") and detector is not None:
                     with detect_lock:
                         sp = detect_results["spots"]
@@ -546,7 +568,8 @@ def main() -> int:
                     detector.draw_detections(frame, sp, rects=rt,
                                              show_mask=True, mask=mk)
                 draw_hud(frame, video.fps, float(s["speed"]), float(s["angle"]),
-                         video.connected, bool(s["cmd_ok"]), str(s["tstate"]))
+                         video.connected, bool(s["cmd_ok"]), str(s["tstate"]),
+                         float(s.get("curvature", 130.0)))
 
                 # Relay UDP vers CarPlay (frame complet avec overlay)
                 if udp_relay is not None:
