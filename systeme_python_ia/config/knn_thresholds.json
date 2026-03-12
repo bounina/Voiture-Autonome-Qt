@@ -1,14 +1,14 @@
 {
   "H_min": 95,
-  "H_max": 125,
-  "S_min": 60,
+  "H_max": 126,
+  "S_min": 40,
   "S_max": 255,
   "V_min": 100,
   "V_max": 255,
-  "L_min": 70,
+  "L_min": 68,
   "L_max": 180,
   "a_min": 110,
-  "a_max": 155,
+  "a_max": 157,
   "b_min": 40,
-  "b_max": 115
+  "b_max": 120
 }
