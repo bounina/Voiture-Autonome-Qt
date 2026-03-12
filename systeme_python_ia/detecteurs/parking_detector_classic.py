@@ -20,11 +20,16 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import sys
 
-HSV_CONFIG_FILE = Path(__file__).parent / "hsv_config.json"
-KNN_MODEL_FILE = Path(__file__).parent / "knn_model.xml"
-KNN_NORM_FILE = Path(__file__).parent / "knn_norm.npz"
-KNN_THRESHOLDS_FILE = Path(__file__).parent / "knn_thresholds.json"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(PROJECT_ROOT))
+
+# Configuration files
+HSV_CONFIG_FILE = PROJECT_ROOT / "config" / "hsv_config.json"
+KNN_MODEL_FILE = PROJECT_ROOT / "modeles_et_donnees" / "knn_model.xml"
+KNN_NORM_FILE = PROJECT_ROOT / "modeles_et_donnees" / "knn_norm.npz"
+KNN_THRESHOLDS_FILE = PROJECT_ROOT / "config" / "knn_thresholds.json"
 
 _DEFAULT_HSV = {
     "h_min": 90, "s_min": 50, "v_min": 50,

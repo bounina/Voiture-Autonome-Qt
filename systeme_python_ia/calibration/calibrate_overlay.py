@@ -22,7 +22,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-OVERLAY_CALIB_FILE = Path(__file__).parent / "overlay_calib.json"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(PROJECT_ROOT))
+
+# Configuration files
+OVERLAY_CALIB_FILE = PROJECT_ROOT / "config" / "overlay_calib.json"
 
 # Valeurs par défaut (fractions d'écran)
 DEFAULT_CORNERS = {

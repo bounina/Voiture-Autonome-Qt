@@ -21,9 +21,14 @@ import ctypes
 import json
 import socket
 import struct
+import sys
 import threading
 import time
 from pathlib import Path
+
+# Ajouter la racine du projet systeme_python_ia au PYTHONPATH
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(PROJECT_ROOT))
 
 import cv2
 import numpy as np
@@ -59,8 +64,8 @@ MAX_ANGLE      = 1.0
 CONTROL_HZ     = 30
 
 # ═══════════════════════ CALIBRATION (from parking_calib.json) ════════════
-CALIB_FILE = Path(__file__).parent / "parking_calib.json"
-OVERLAY_CALIB_FILE = Path(__file__).parent / "overlay_calib.json"
+CALIB_FILE = PROJECT_ROOT / "config" / "parking_calib.json"
+OVERLAY_CALIB_FILE = PROJECT_ROOT / "config" / "overlay_calib.json"
 
 def _load_calib() -> list | None:
     if not CALIB_FILE.exists():
@@ -410,13 +415,13 @@ def main() -> int:
 
     # Parking detection
     try:
-        from parking_detector_yolo import ParkingDetectorYOLO as ParkingDetector
+        from detecteurs.parking_detector_yolo import ParkingDetectorYOLO as ParkingDetector
         detector = ParkingDetector()
         print("[PARKING] Détecteur YOLO initialisé (touche P pour activer)")
     except ImportError as e:
         print(f"[PARKING] YOLO non disponible ({e}), tentative module classique...")
         try:
-            from parking_detector_classic import ParkingDetector
+            from detecteurs.parking_detector_classic import ParkingDetector
             detector = ParkingDetector()
             print("[PARKING] Détecteur CLASSIC initialisé (touche P)")
         except ImportError:

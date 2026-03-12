@@ -30,7 +30,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-CALIB_FILE = Path(__file__).parent / "parking_calib.json"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(PROJECT_ROOT))
+
+# Configuration files
+CALIB_FILE = PROJECT_ROOT / "config" / "parking_calib.json"
 
 
 def recv_exact(sock: socket.socket, size: int) -> bytes:

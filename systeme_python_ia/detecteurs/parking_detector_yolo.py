@@ -4,6 +4,9 @@ from ultralytics import YOLO
 
 import os
 from pathlib import Path
+import sys
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 class ParkingDetectorYOLO:
     """
@@ -12,9 +15,8 @@ class ParkingDetectorYOLO:
     """
     def __init__(self, model_path=None):
         if model_path is None:
-            # Résoudre le chemin absolu par rapport à ce script
-            base_dir = Path(__file__).parent
-            model_path = str(base_dir / "runs" / "segment" / "runs" / "parking_seg" / "train_yolov8n" / "weights" / "best.pt")
+            # Résoudre le chemin absolu vers le dossier modeles_et_donnees
+            model_path = str(PROJECT_ROOT / "modeles_et_donnees" / "runs" / "segment" / "runs" / "parking_seg" / "train_yolov8n" / "weights" / "best.pt")
             
         # On charge le réseau de neurones entraîné (silencieux pour le stream)
         print(f"[YOLO] Chargement du modèle depuis {model_path}...")
